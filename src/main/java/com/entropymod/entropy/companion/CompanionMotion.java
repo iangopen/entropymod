@@ -143,6 +143,52 @@ public final class CompanionMotion {
 	}
 
 	// ==================================================================
+	// Gather (respawn / rejoin / dimension change)
+	// ==================================================================
+
+	/**
+	 * Whether a companion should be pulled to its owner on a <em>discontinuity</em>
+	 * -- a respawn, a rejoin, or a dimension change.
+	 *
+	 * <h2>Why the per-tick catch-up could not cover this, structurally</h2>
+	 *
+	 * <p>{@code CompanionService.catchUp} resolves companions with
+	 * {@code Level.getEntity(UUID)}, which is
+	 * {@code getEntities().get(uuid)} on {@code LevelEntityGetter} -- <b>loaded
+	 * entities only</b>. That is the same limitation {@code CompanionRoster}'s javadoc
+	 * already records for a different purpose, and the consequence for movement was
+	 * missed: <b>the further a companion is left behind, the less able the catch-up is
+	 * to do anything about it</b>, and past simulation distance it cannot act at all.
+	 * The feature was weakest in exactly the case it existed for.
+	 *
+	 * <p><b>A death respawn is the worst instance of that case and it is not rare.</b>
+	 * Confirmed from a world save: four Entourage golems alive at 94-97 of 100 HP,
+	 * <b>400.9 to 407.0 blocks</b> from their owner after a respawn -- roughly 2.5x the
+	 * 160-block simulation distance, so every per-tick lookup returned null and the
+	 * escort was, from the player's seat, simply gone. They were never dead.
+	 *
+	 * <p>So the recovery is bound to the discontinuity itself, where the companion's
+	 * chunk is still loaded because the player was standing in it moments earlier, and
+	 * where {@code getEntityInAnyDimension} can also follow one into another dimension.
+	 *
+	 * <p><b>Honest limit, stated rather than discovered later:</b> a companion that had
+	 * <em>already</em> unloaded before the event -- walk 500 blocks away, then relog --
+	 * still cannot be resolved, because nothing records where it was and there is no
+	 * vanilla lookup for an unloaded UUID. That case logs its own cause. The complete
+	 * fix is to persist each companion's last known position in the roster so its chunk
+	 * can be loaded on demand; it is not built because the reported failure is the
+	 * respawn one, and a schema change should be paid for by a failure that needs it.
+	 *
+	 * @param sameLevel whether companion and owner are in the same dimension
+	 * @param distance  distance to the owner; ignored when {@code sameLevel} is false
+	 */
+	public static boolean shouldGather(boolean sameLevel, double distance) {
+		// A different dimension is unconditional: there is no distance to compare, and
+		// leaving them behind is the permanent-loss case.
+		return !sameLevel || distance > CATCH_UP_DISTANCE;
+	}
+
+	// ==================================================================
 	// Escort band (The Entourage)
 	// ==================================================================
 
@@ -213,11 +259,37 @@ public final class CompanionMotion {
 	 *       violates the minimum" -- so the minimum-distance rule is the one thing
 	 *       that can override a freeze. Without this a villager the player walked
 	 *       into would freeze in their face, which is the opposite of the effect.</li>
-	 *   <li><b>FROZEN next.</b> Being watched stops them dead, at any distance.</li>
-	 *   <li><b>APPROACHING</b> only when unseen and genuinely lost.</li>
+	 *   <li><b>APPROACHING when genuinely lost, and this outranks FROZEN.</b> See the
+	 *       bug note below -- this ordering is the fix, not a preference.</li>
+	 *   <li><b>APPROACHING while an approach is still in progress</b>, for the same
+	 *       reason: an approach that can be frozen half way is an approach that never
+	 *       completes.</li>
+	 *   <li><b>FROZEN next.</b> Being watched stops them dead, anywhere inside the
+	 *       tracking corridor.</li>
 	 *   <li><b>IDLE</b> otherwise -- the ordinary state, where the villager's own
 	 *       brain is left entirely alone.</li>
 	 * </ol>
+	 *
+	 * <h2>The bug this ordering fixes: FROZEN made APPROACHING unreachable</h2>
+	 *
+	 * <p>FROZEN used to be tested <em>before</em> both APPROACHING clauses, with the
+	 * documented intent "being watched stops them dead, <b>at any distance</b>". That
+	 * sentence is the bug. {@code canBeSeen} is a line-of-sight <em>clip</em>, not a
+	 * facing test -- <b>the player does not have to be looking at the villager, or
+	 * even near it</b> -- so in ordinary open terrain a villager retains line of sight
+	 * for as far as the ray runs. FROZEN therefore won at every distance and
+	 * {@code distance > lostTrackDistance} was dead code outdoors: the audience stopped
+	 * and never resumed, which is exactly the reported symptom.
+	 *
+	 * <p><b>Confirmed from a world save rather than argued.</b> All ten shipped
+	 * villagers sat at <b>60.1, 65.1, 65.7, 68.4, 72.9, 85.3, 85.9, 90.6, 137.1 and
+	 * 140.3 blocks</b> from their owner -- every one of them past
+	 * {@code lostTrackDistance} of 32, none approaching, on open hillside with clear
+	 * sight lines. No respawn was involved in reaching that state, which is what rules
+	 * out the stale-player-reference explanation for this symptom.
+	 *
+	 * <p>Note this is failure mode 2 from CLAUDE.md's catalogue in a non-mixin
+	 * setting: the value was computed correctly and a later branch discarded it.
 	 *
 	 * <p><b>Hysteresis is why {@code resumeDistance} exists and is a separate
 	 * number.</b> If APPROACHING both started and ended at {@code lostTrack}, a
@@ -234,16 +306,21 @@ public final class CompanionMotion {
 		if (distance < minDistance) {
 			return AudienceState.BACK_OFF;
 		}
-		if (canBeSeen) {
-			return AudienceState.FROZEN;
-		}
 		if (distance > lostTrackDistance) {
+			// Outranks FROZEN deliberately: "lost track" is a statement about distance,
+			// and a villager this far away has lost the player whether or not a ray
+			// happens to reach them. This is the line that was unreachable before.
 			return AudienceState.APPROACHING;
 		}
 		if (wasApproaching && distance > resumeDistance) {
 			// Mid-approach and not yet inside the resume ring: keep going rather than
-			// stopping the moment the entry threshold is no longer met.
+			// stopping the moment the entry threshold is no longer met. Also above
+			// FROZEN -- an approach interrupted by line of sight at 25 blocks would
+			// strand the villager in the corridor it is supposed to be crossing.
 			return AudienceState.APPROACHING;
+		}
+		if (canBeSeen) {
+			return AudienceState.FROZEN;
 		}
 		return AudienceState.IDLE;
 	}

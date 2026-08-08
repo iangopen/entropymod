@@ -222,6 +222,13 @@ public class EntropyMod implements ModInitializer {
 		}
 		EntropyManager manager = EntropyManager.get(server);
 		manager.reapplyAll(server, player);
+		// Companions are the one acquired thing reapplyAll CANNOT restore: their
+		// apply() is gated on isFreshPick() by design (re-running it would be four
+		// more golems), so re-application is a no-op for them and something else has
+		// to put them back within reach. Without this a death respawn leaves the
+		// escort wherever the player died -- alive, but past simulation distance and
+		// therefore invisible to every per-tick lookup. See CompanionMotion.shouldGather.
+		CompanionService.gather(server, player);
 		// Sent unconditionally, including for an empty run: the client must be told
 		// "you have nothing" too, or a stale cache from a previous world would
 		// survive into this one.

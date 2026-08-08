@@ -130,6 +130,113 @@ public final class CompanionService {
 	// ==================================================================
 
 	/**
+	 * Where each effect's companions are put down when they are gathered.
+	 *
+	 * <p>Per-effect rather than one shared ring, because "beside you" means something
+	 * different for an escort than for the Audience: dropping ten villagers at 2-4
+	 * blocks would violate {@link TheAudienceBehavior#MIN_DISTANCE} on the very tick
+	 * they arrive, and the next evaluation would immediately BACK_OFF all ten.
+	 */
+	private record GatherSpec(String effectId, double minDistance, double maxDistance) {}
+
+	private static final List<GatherSpec> GATHER_SPECS = List.of(
+			new GatherSpec(LoyalPackBehavior.ID,
+					CompanionMotion.TELEPORT_MIN_DISTANCE, CompanionMotion.TELEPORT_MAX_DISTANCE),
+			new GatherSpec(TheEntourageBehavior.ID,
+					CompanionMotion.TELEPORT_MIN_DISTANCE, CompanionMotion.TELEPORT_MAX_DISTANCE),
+			new GatherSpec(EmotionalSupportLlamaBehavior.ID,
+					CompanionMotion.TELEPORT_MIN_DISTANCE, CompanionMotion.TELEPORT_MAX_DISTANCE),
+			// The Audience arrives at its own standoff ring, not at heel.
+			new GatherSpec(TheAudienceBehavior.ID,
+					TheAudienceBehavior.MIN_DISTANCE, TheAudienceBehavior.RESUME_DISTANCE));
+
+	/**
+	 * Pulls a player's companions back to them after a respawn, rejoin or dimension
+	 * change. See {@link CompanionMotion#shouldGather} for why this cannot be left to
+	 * the per-tick catch-up.
+	 *
+	 * <p><b>The Audience is included here even though it is excluded from catch-up</b>,
+	 * and the distinction is real rather than an inconsistency: catch-up fires
+	 * continuously on a stall, which for the Audience would delete the wandering that
+	 * is the entire effect. This fires only on a discontinuity, where the alternative
+	 * is not "they wander" but "they are 400 blocks away in an unloaded chunk forever".
+	 *
+	 * @return how many companions were actually moved
+	 */
+	public static int gather(MinecraftServer server, ServerPlayer player) {
+		EntropyManager manager = EntropyManager.get(server);
+		CompanionRoster roster = manager.companions();
+		if (roster.isEmpty()) {
+			return 0;
+		}
+		ServerLevel level = player.level();
+		String owner = player.getUUID().toString();
+		int moved = 0;
+		int unresolved = 0;
+
+		for (GatherSpec spec : GATHER_SPECS) {
+			if (!manager.acquired().contains(spec.effectId())) {
+				continue;
+			}
+			for (String id : roster.uuidsFor(owner, spec.effectId())) {
+				// Not level.getEntity: that searches this dimension only, so a companion
+				// left in the Nether by a player who died back to the overworld would
+				// read as gone. This is vanilla's own cross-dimension lookup and it
+				// still costs a plain map hit when the entity is in this level.
+				Entity entity = level.getEntityInAnyDimension(UUID.fromString(id));
+				if (entity == null) {
+					// The one case gather genuinely cannot fix. Named in the log rather
+					// than silent -- the spawn batch's lesson was that a failure path
+					// which does not say why turns a five-minute diagnosis into a
+					// world-save excavation.
+					unresolved++;
+					continue;
+				}
+				if (!(entity instanceof Mob companion) || !companion.isAlive()) {
+					continue;
+				}
+
+				boolean sameLevel = companion.level() == level;
+				double distance = sameLevel ? Math.sqrt(companion.distanceToSqr(player)) : -1.0;
+				if (!CompanionMotion.shouldGather(sameLevel, distance)) {
+					continue;
+				}
+
+				SafeSpawn.Attempt spot = SafeSpawn.findNear(level, player, companion.getType(),
+						spec.minDistance(), spec.maxDistance(), level.getRandom(),
+						SafeSpawn.DistanceMode.HORIZONTAL);
+				if (!spot.found()) {
+					EntropyMod.LOGGER.debug("Companion gather: no safe spot near {} for {}",
+							player.getName().getString(), spec.effectId());
+					continue;
+				}
+				Vec3 centre = Vec3.atBottomCenterOf(spot.pos());
+				companion.getNavigation().stop();
+				// teleportTo, not snapTo: snapTo cannot cross dimensions, and a companion
+				// moved with it would be left registered in the level it came from.
+				companion.teleportTo(level, centre.x, centre.y, centre.z, Set.of(),
+						companion.getYRot(), companion.getXRot(), false);
+				// Both pieces of transient state describe a distance that no longer
+				// exists. Leaving them would measure the next sample against a gap from
+				// before the teleport.
+				STALLS.forget(id);
+				APPROACHING.remove(id);
+				moved++;
+			}
+		}
+
+		if (moved > 0 || unresolved > 0) {
+			EntropyMod.LOGGER.info(
+					"Companion gather for {}: {} moved, {} unresolved (not in a loaded chunk "
+							+ "in any dimension -- see CompanionMotion.shouldGather)",
+					player.getName().getString(), moved, unresolved);
+		}
+		return moved;
+	}
+
+	// ==================================================================
+
+	/**
 	 * The shared catch-up teleport: far away AND not closing the gap for three
 	 * consecutive seconds means put it down beside the player.
 	 */

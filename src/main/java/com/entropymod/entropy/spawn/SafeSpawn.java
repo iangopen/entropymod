@@ -361,12 +361,35 @@ public final class SafeSpawn {
 	}
 
 	/**
+	 * Vanilla's own maximum sight range, beyond which
+	 * {@code LivingEntity.hasLineOfSight} answers false without clipping at all.
+	 *
+	 * <p>Read out of bytecode rather than assumed:
+	 * {@code hasLineOfSight(Entity, Block, Fluid, double)} compares
+	 * {@code Vec3.distanceTo} against {@code ldc2_w 128.0d} and returns
+	 * {@code iconst_0} when it is greater.
+	 */
+	public static final double MAX_SIGHT_DISTANCE = 128.0;
+
+	/**
 	 * Whether nothing solid stands between the player's eye and a point.
 	 *
-	 * <p>Exactly the clip {@code LivingEntity.hasLineOfSight} performs, with the
-	 * player as the clip context's entity so its own collision is excluded.
+	 * <p>The clip {@code LivingEntity.hasLineOfSight} performs, with the player as the
+	 * clip context's entity so its own collision is excluded.
+	 *
+	 * <p><b>The distance gate is vanilla's and was missing.</b> This method's javadoc
+	 * used to claim it was "exactly" vanilla's check while omitting the
+	 * {@link #MAX_SIGHT_DISTANCE} cut-off that vanilla applies <em>before</em> clipping
+	 * -- so it answered "visible" for pairs vanilla calls invisible, and paid for a
+	 * hundred-block ray to do it. At the spawn distances this class was written for
+	 * (2-40 blocks) the gate never fires and nothing changes; it mattered once
+	 * {@code CompanionService} started asking the question about companions at 137 and
+	 * 140 blocks. A helper that says it mirrors vanilla has to mirror all of it.
 	 */
 	public static boolean hasLineOfSight(ServerLevel level, ServerPlayer player, Vec3 from, Vec3 to) {
+		if (from.distanceTo(to) > MAX_SIGHT_DISTANCE) {
+			return false;
+		}
 		return level.clip(new ClipContext(from, to,
 				ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player)).getType()
 				== HitResult.Type.MISS;

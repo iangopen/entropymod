@@ -101,6 +101,15 @@ public final class TheEntourageBehavior implements EffectBehavior {
 					// it ever turning on villagers or wandering off to defend a village
 					// instead of its owner.
 					golem.setPlayerCreated(true);
+					// THE LINE THAT WAS MISSING. CompanionRoster's contract is that a
+					// companion which dies stays dead -- nothing ever re-summons -- and
+					// that is only acceptable for this effect because it is one of the
+					// three that "cannot arise". Without this the golems were the one
+					// invulnerable-by-contract companion that was in fact mortal, and a
+					// dead escort was gone for the rest of the run with no way back.
+					// Confirmed from a world save: shipped golems read Invulnerable=0 and
+					// were already down to 94-97 of 100 HP.
+					golem.setInvulnerable(true);
 				});
 		manager.recordCompanions(ctx.target(), ID, spawned);
 	}

@@ -4109,6 +4109,158 @@ public final class HarnessMain {
 		check(roster.countFor("p", LoyalPackBehavior.ID) == afterFirst,
 				"ten respawns leave the recorded pack at " + afterFirst + ", not "
 						+ (afterFirst * 11));
+
+		companionsSurviveDeathRespawn();
+	}
+
+	/**
+	 * VERIFICATION 3: a death respawn -- a brand-new {@code ServerPlayer} object with
+	 * the same UUID -- leaves the Entourage alive, invulnerable, and still tracked and
+	 * followed.
+	 *
+	 * <h2>What this drives, and why that is the right level</h2>
+	 *
+	 * <p>The harness cannot construct a {@code ServerPlayer}. What it CAN do is drive
+	 * every decision the respawn path makes, and those are exactly the ones that were
+	 * wrong: whether the roster still resolves for the same UUID, whether the gather
+	 * decision fires at the distance a respawn actually produces, and whether the
+	 * follow band then reports the escort as functionally following rather than merely
+	 * present. The parts that need a live server -- the UUID lookup and the teleport --
+	 * are asserted structurally, against bytecode.
+	 *
+	 * <p><b>"Not just present in the world, but actually still working"</b> is the
+	 * standard this section is written to, so it ends by running the escort through the
+	 * hold band and requiring it to reach HOLD.
+	 */
+	private static void companionsSurviveDeathRespawn() {
+		section("VERIFICATION: death + respawn (new ServerPlayer, same UUID)");
+
+		// The real UUIDs and distances out of the world save that produced the report.
+		String owner = "f835675c-e0ba-394b-82c9-8aaebeea0b9f";
+		List<String> golems = List.of(
+				"05e96cf4-e2f0-4591-9206-07fd76afcf80", "4368af45-4d99-48ac-b99a-f53840d47832",
+				"90ffc8f6-8667-4ff8-8214-02f54ced6e74", "7e6313f8-f7fb-4577-834a-097ec6602baa");
+		double[] afterRespawn = {407.0, 402.5, 400.9, 402.8};
+
+		CompanionRoster roster = new CompanionRoster();
+		roster.record(owner, TheEntourageBehavior.ID, golems);
+
+		// --- the respawn itself: a new player OBJECT, the same UUID ---------------
+		// PlayerList.respawn constructs an entirely new ServerPlayer (CLAUDE.md, from
+		// the Become Hardcore investigation). The roster is keyed on the UUID STRING,
+		// so the new object resolves the identical entry -- this is the assertion that
+		// refutes the stale-reference hypothesis on the mod side.
+		String uuidBeforeDeath = owner;
+		String uuidAfterRespawn = owner;          // unchanged, per the vanilla contract
+		check(CompanionRoster.key(uuidBeforeDeath, TheEntourageBehavior.ID)
+						.equals(CompanionRoster.key(uuidAfterRespawn, TheEntourageBehavior.ID)),
+				"the roster key is built from the UUID, so a brand-new ServerPlayer object "
+						+ "with the same UUID addresses the identical entry");
+		check(roster.uuidsFor(uuidAfterRespawn, TheEntourageBehavior.ID).size() == 4,
+				"all 4 golems are still on the roster after the respawn (nothing is keyed "
+						+ "on the player object, so there is nothing to go stale)");
+		check(roster.uuidsFor(uuidAfterRespawn, TheEntourageBehavior.ID).equals(golems),
+				"...and they are the same 4 UUIDs, in order");
+
+		// --- and the service re-resolves the player every pass, never caches it ----
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "getPlayerList"),
+				"CompanionService reads the player list every pass rather than holding a "
+						+ "ServerPlayer -- the structural reason the hypothesis was refuted");
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "getUUID"),
+				"...and keys every roster lookup by UUID");
+
+		// --- ALIVE: invulnerability is actually set, not merely intended -----------
+		// The gap that shipped: the Audience and the llama set it, the Entourage did
+		// not, and the golems in the save read Invulnerable=0 at 94-97 of 100 HP.
+		check(Checks.classReferences(TheEntourageBehavior.class, "setInvulnerable"),
+				"REGRESSION: The Entourage sets setInvulnerable(true). It did not, which "
+						+ "made it the one companion invulnerable by CompanionRoster's "
+						+ "contract but mortal in fact");
+		for (String id : List.of(TheAudienceBehavior.ID, EmotionalSupportLlamaBehavior.ID,
+				TheEntourageBehavior.ID)) {
+			check(Checks.classReferences(EffectBehaviors.get(id).getClass(), "setInvulnerable"),
+					id + ": invulnerable on spawn -- all three of the contract's "
+							+ "'cannot arise' effects, checked together so one cannot drift "
+							+ "away from the other two again");
+		}
+		check(!Checks.classReferences(LoyalPackBehavior.class, "setInvulnerable"),
+				"...and Loyal Pack is deliberately NOT invulnerable -- they are real, "
+						+ "mortal animals, which is the documented contrast");
+
+		// --- TRACKED: the gather decision fires at the real post-respawn distance ---
+		int gathered = 0;
+		for (double d : afterRespawn) {
+			if (CompanionMotion.shouldGather(true, d)) {
+				gathered++;
+			}
+		}
+		check(gathered == afterRespawn.length,
+				"all 4 golems, at the distances they were ACTUALLY found at after the "
+						+ "respawn (400.9-407.0 blocks), are gathered back (" + gathered
+						+ "/4) -- before the fix nothing moved them and the per-tick "
+						+ "catch-up could not even resolve them");
+		check(CompanionMotion.shouldGather(false, 1.0),
+				"a companion in ANOTHER DIMENSION is gathered unconditionally -- dying in "
+						+ "the Nether and respawning in the overworld was the permanent-loss "
+						+ "case, and distance says nothing across levels");
+		check(!CompanionMotion.shouldGather(true, 3.0),
+				"a golem already at heel (3 blocks) is NOT teleported -- a respawn must not "
+						+ "shuffle an escort that is already where it belongs");
+		check(!CompanionMotion.shouldGather(true, CompanionMotion.CATCH_UP_DISTANCE),
+				"...and the boundary is exclusive at vanilla's own 12-block pet-teleport "
+						+ "distance, so gather and catch-up agree on what 'too far' means");
+
+		// --- the gather is actually WIRED to the respawn path ---------------------
+		check(Checks.classReferences(com.entropymod.EntropyMod.class, "gather"),
+				"EntropyMod calls CompanionService.gather from the same place it re-applies "
+						+ "effects -- i.e. on JOIN, AFTER_RESPAWN and AFTER_PLAYER_CHANGE_LEVEL");
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class,
+						"getEntityInAnyDimension"),
+				"gather resolves with getEntityInAnyDimension, not getEntity -- the "
+						+ "single-level lookup returns null for a companion left behind in "
+						+ "another dimension");
+
+		// --- FOLLOWING: a gathered escort reaches HOLD and stays there -------------
+		// "Still working", not "still present". A golem put down at 2-4 blocks must
+		// settle inside the 3-5 band rather than sit on a boundary or walk away.
+		double min = constant(TheEntourageBehavior.class, "MIN_HOLD");
+		double max = constant(TheEntourageBehavior.class, "MAX_HOLD");
+		double ideal = CompanionMotion.idealHoldDistance(min, max);
+		double placed = CompanionMotion.TELEPORT_MIN_DISTANCE;   // worst case: closest drop
+		int steps = 0;
+		CompanionMotion.BandAction action = CompanionMotion.bandAction(placed, min, max);
+		while (action != CompanionMotion.BandAction.HOLD && steps < 50) {
+			// Both APPROACH and RETREAT navigate to the same ring midpoint.
+			placed = ideal;
+			action = CompanionMotion.bandAction(placed, min, max);
+			steps++;
+		}
+		check(action == CompanionMotion.BandAction.HOLD && steps <= 1,
+				"a golem dropped at the gather distance settles into HOLD in " + steps
+						+ " correction(s) -- it is following again, not merely alive");
+		check(CompanionMotion.bandAction(ideal, min, max) == CompanionMotion.BandAction.HOLD,
+				"...and the point it is sent to is itself in-band, so it cannot arrive and "
+						+ "immediately re-trigger");
+
+		// --- Loyal Pack / the llama: same pattern, checked rather than assumed -----
+		// Verification 5. Vanilla stores a tamed owner as EntityReference<LivingEntity>,
+		// an Either<UUID, Entity> that DEMOTES itself back to the UUID branch the moment
+		// the held entity reports isRemoved() -- so a dead player's wolves re-resolve to
+		// the new object by themselves. Nothing mod-side caches a player for them either.
+		for (String id : List.of(LoyalPackBehavior.ID, EmotionalSupportLlamaBehavior.ID)) {
+			Class<?> behavior = EffectBehaviors.get(id).getClass();
+			check(!Checks.classReferences(behavior, "getPlayerList"),
+					id + ": holds no player list of its own");
+			check(Checks.classReferences(behavior, "target"),
+					id + ": takes its owner from the EffectContext passed to that call, which "
+							+ "is constructed per-apply and never stored");
+		}
+		check(roster.uuidsFor(uuidAfterRespawn, LoyalPackBehavior.ID).isEmpty(),
+				"and the roster keeps the two effects' entries separate, so gathering one "
+						+ "never touches the other");
 	}
 
 	/** The roster's own rules -- keying, counting, forgetting. */
@@ -4353,17 +4505,47 @@ public final class HarnessMain {
 						+ "is ~10.79 b/s -- 1.9x a sprinting player, because mob speed goes "
 						+ "as the square of the attribute");
 
-		// --- FROZEN outranks everything except the minimum-distance rule ---------
+		// --- REGRESSION: FROZEN must NOT outrank a genuine loss of track ---------
+		// These three assertions used to require the OPPOSITE, and that is the point:
+		// the harness was green while the bug shipped, because it asserted the
+		// behaviour the javadoc described ("being watched stops them dead, AT ANY
+		// DISTANCE") rather than the behaviour the effect needs. A villager that
+		// freezes at 40 blocks never comes back, and canBeSeen is a line-of-sight clip
+		// rather than a facing test, so outdoors it is true almost always.
 		check(CompanionMotion.audienceState(40.0, true, false, minD, resume, lost)
-						== CompanionMotion.AudienceState.FROZEN,
-				"seen at 40 blocks -- beyond lost-track -- still FREEZES: being watched "
-						+ "outranks wanting to follow");
+						== CompanionMotion.AudienceState.APPROACHING,
+				"REGRESSION: seen at 40 blocks -- beyond lost-track -- APPROACHES. Being "
+						+ "watched must not outrank having lost the player, or the audience "
+						+ "freezes once in open ground and never resumes");
 		check(CompanionMotion.audienceState(25.0, true, true, minD, resume, lost)
-						== CompanionMotion.AudienceState.FROZEN,
-				"seen mid-approach: FREEZES, abandoning the approach");
+						== CompanionMotion.AudienceState.APPROACHING,
+				"REGRESSION: seen mid-approach at 25, it KEEPS GOING -- an approach that "
+						+ "line of sight can interrupt half way is an approach that never "
+						+ "completes, stranding it in the 16-32 corridor");
 		check(CompanionMotion.audienceState(18.0, true, false, minD, resume, lost)
 						== CompanionMotion.AudienceState.FROZEN,
-				"seen at 18: FROZEN");
+				"seen at 18 and not approaching: still FROZEN -- the freeze is intact "
+						+ "everywhere it was actually wanted, inside the tracking corridor");
+		check(CompanionMotion.audienceState(30.0, true, false, minD, resume, lost)
+						== CompanionMotion.AudienceState.FROZEN,
+				"...and at 30, just inside lost-track: FROZEN");
+
+		// The exact ten distances the ten shipped villagers were found at in the world
+		// save, every one of them past lost-track, none of them approaching. Driven as
+		// data so the reported failure itself is the test.
+		double[] observed = {60.1, 65.1, 65.7, 68.4, 72.9, 85.3, 85.9, 90.6, 137.1, 140.3};
+		int approachingNow = 0;
+		for (double d : observed) {
+			if (CompanionMotion.audienceState(d, true, false, minD, resume, lost)
+					== CompanionMotion.AudienceState.APPROACHING) {
+				approachingNow++;
+			}
+		}
+		check(approachingNow == observed.length,
+				"THE REPORTED BUG: all " + observed.length + " villagers, at the distances "
+						+ "they were actually found at in the world save (60.1-140.3 blocks, "
+						+ "with line of sight), now APPROACH (" + approachingNow + "/"
+						+ observed.length + ") -- before the fix every one froze");
 
 		// --- the minimum-distance rule outranks the freeze ------------------------
 		check(CompanionMotion.audienceState(4.0, true, false, minD, resume, lost)
@@ -4426,16 +4608,95 @@ public final class HarnessMain {
 						== CompanionMotion.AudienceState.FROZEN,
 				"breaking and re-establishing line of sight at 25 flips IDLE <-> FROZEN");
 		check(CompanionMotion.audienceState(33.0, true, true, minD, resume, lost)
-						== CompanionMotion.AudienceState.FROZEN
+						== CompanionMotion.AudienceState.APPROACHING
 						&& CompanionMotion.audienceState(33.0, false, true, minD, resume, lost)
 						== CompanionMotion.AudienceState.APPROACHING,
-				"...and at 33 flips FROZEN <-> APPROACHING, so stepping out of sight "
-						+ "resumes the approach");
+				"beyond lost-track the approach no longer depends on line of sight at all "
+						+ "-- seen or unseen at 33, it approaches");
 
 		check(Checks.classReferences(
 						com.entropymod.entropy.companion.CompanionService.class, "hasLineOfSight"),
 				"the service reuses SafeSpawn's existing clip rather than building a "
 						+ "second line-of-sight mechanism");
+
+		audienceRecoversWithoutRespawn();
+	}
+
+	/**
+	 * VERIFICATION 4: the Audience can get back to APPROACHING from both stuck states,
+	 * driven only by distance, with no respawn anywhere in the scenario.
+	 *
+	 * <p>This is what separates the two reported bugs. If the audience could only
+	 * recover across a respawn, the stale-player-reference hypothesis would still be
+	 * live for it; recovering here, in a pure state-machine walk, is what rules that
+	 * hypothesis out for this symptom specifically.
+	 */
+	private static void audienceRecoversWithoutRespawn() {
+		section("Audience: BACK_OFF / FROZEN -> APPROACHING with no respawn involved");
+
+		double minD = constant(TheAudienceBehavior.class, "MIN_DISTANCE");
+		double resume = constant(TheAudienceBehavior.class, "RESUME_DISTANCE");
+		double lost = constant(TheAudienceBehavior.class, "LOST_TRACK_DISTANCE");
+
+		// --- FROZEN -> APPROACHING, purely by the player walking away -------------
+		// Line of sight is held TRUE for the whole walk. That is the scenario that was
+		// broken: the player never breaks the ray, so under the old ordering the
+		// villager stayed FROZEN for every distance out to infinity.
+		boolean wasApproaching = false;
+		CompanionMotion.AudienceState state = null;
+		double frozeAt = 18.0;
+		state = CompanionMotion.audienceState(frozeAt, true, false, minD, resume, lost);
+		check(state == CompanionMotion.AudienceState.FROZEN,
+				"start: settled and watched at 18 blocks -> FROZEN");
+
+		Double resumedAt = null;
+		for (double d = frozeAt; d <= 60.0; d += 0.5) {
+			state = CompanionMotion.audienceState(d, true, wasApproaching, minD, resume, lost);
+			wasApproaching = state == CompanionMotion.AudienceState.APPROACHING;
+			if (wasApproaching && resumedAt == null) {
+				resumedAt = d;
+			}
+		}
+		check(resumedAt != null,
+				"walking away from a FROZEN villager -- WITH line of sight unbroken the "
+						+ "whole way, and no death anywhere -- gets it back to APPROACHING");
+		check(resumedAt != null && resumedAt > lost && resumedAt <= lost + 0.5,
+				"...and it resumes as soon as it passes lost-track, at " + resumedAt
+						+ " blocks rather than at some later distance");
+		check(state == CompanionMotion.AudienceState.APPROACHING,
+				"...and it is STILL approaching at 60 blocks, not stuck again");
+
+		// --- BACK_OFF -> APPROACHING ----------------------------------------------
+		state = CompanionMotion.audienceState(4.0, true, false, minD, resume, lost);
+		check(state == CompanionMotion.AudienceState.BACK_OFF,
+				"start: crowded at 4 blocks -> BACK_OFF");
+		wasApproaching = false;
+		resumedAt = null;
+		for (double d = 4.0; d <= 60.0; d += 0.5) {
+			state = CompanionMotion.audienceState(d, true, wasApproaching, minD, resume, lost);
+			wasApproaching = state == CompanionMotion.AudienceState.APPROACHING;
+			if (wasApproaching && resumedAt == null) {
+				resumedAt = d;
+			}
+		}
+		check(resumedAt != null && state == CompanionMotion.AudienceState.APPROACHING,
+				"a villager that had BACKED OFF also reaches APPROACHING again on the same "
+						+ "walk -- neither stuck state is terminal");
+
+		// --- and the round trip, so the freeze is not simply gone ------------------
+		wasApproaching = true;
+		int sawFrozen = 0;
+		for (double d = 60.0; d >= 17.0; d -= 0.5) {
+			state = CompanionMotion.audienceState(d, true, wasApproaching, minD, resume, lost);
+			wasApproaching = state == CompanionMotion.AudienceState.APPROACHING;
+			if (state == CompanionMotion.AudienceState.FROZEN) {
+				sawFrozen++;
+			}
+		}
+		check(sawFrozen > 0 && state == CompanionMotion.AudienceState.FROZEN,
+				"coming back the other way it re-freezes once inside the resume ring ("
+						+ sawFrozen + " frozen samples) -- the fix reorders the freeze, it "
+						+ "does not delete it");
 	}
 
 	private HarnessMain() {}

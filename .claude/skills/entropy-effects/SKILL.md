@@ -3425,3 +3425,145 @@ entry — so it could not sit below 40 and could not be excused by precedent
 window moved**: the 0-2 band, the 100-tick fuse, the spherical placement and the
 whole damage model are untouched, and the harness asserts each of those explicitly
 alongside a sweep that no `counterplay = false` effect sits below 40 anywhere.
+
+---
+
+### The companion post-mortem — two shipped bugs, and the pitfalls that generalise
+Two in-game reports: *"Audience villagers stop approaching and never resume"* and
+*"Entourage golems are gone after the player dies and respawns."* Both were
+diagnosed against the **world save** rather than by reading the source, and the
+leading hypothesis was wrong.
+
+#### The stale-player-reference hypothesis: REFUTED, and worth recording as refuted
+The plausible story was that something cached the `ServerPlayer` from `apply()`, and
+`PlayerList.respawn` builds an **entirely new `ServerPlayer`** (same UUID) — so both
+symptoms would share one root cause. It is false, in both directions:
+
+- **Mod side.** `CompanionService.tick` re-reads `server.getPlayerList().getPlayers()`
+  every pass; every roster lookup is keyed `player.getUUID().toString()`;
+  `EffectContext` is constructed at exactly one call site (`EntropyManager:843`) and
+  never stored. There is no cached player anywhere in the companion system.
+- **Vanilla side, and this is the reusable part.** A tamed owner is stored as
+  `EntityReference<LivingEntity>` — internally `Either<UUID, StoredEntityType>`.
+  `getEntity` checks `isRemoved()` on the held entity and, when true, **writes the
+  reference back down to the UUID branch** (`Either.left(entity.getUUID())`) before
+  resolving through `UUIDLookup.lookup`. **Vanilla self-heals a stale entity
+  reference.** So Loyal Pack and the llama are structurally safe across a respawn and
+  needed no change — verified, not assumed.
+
+**Keep the hypothesis in mind for anything that caches a player**, but check
+`EntityReference` before assuming vanilla ownership breaks across a respawn: it does
+not.
+
+#### Bug 1 — "gone" meant unloaded, not dead. `getEntity(UUID)` is loaded-only, and that breaks the feature that needs it most
+The four golems were **alive at 94-97/100 HP, 400.9-407.0 blocks from the player**,
+read straight out of `entities/*.mca`. Nothing had killed them.
+
+`CompanionService.catchUp` resolved companions with `Level.getEntity(UUID)`, whose
+bytecode is `getEntities().get(uuid)` on `LevelEntityGetter` — **loaded entities
+only**. `CompanionRoster`'s javadoc already recorded that limitation *for spawn
+top-up*, and the consequence for **movement** was missed:
+
+> **The further a companion is left behind, the less able the catch-up teleport is to
+> do anything about it — and past simulation distance (~160 blocks) it cannot act at
+> all. The recovery mechanism was weakest in exactly the case it existed for.**
+
+A death respawn is the worst instance and it is routine: respawn puts the player at
+their spawn point, arbitrarily far, in one tick.
+
+**Fix:** `CompanionService.gather(server, player)`, called from the same three hooks
+as `reapplyAll` (JOIN / AFTER_RESPAWN / AFTER_PLAYER_CHANGE_LEVEL). It resolves with
+**`ServerLevel.getEntityInAnyDimension(UUID)`** — which tries this level then iterates
+`getAllLevels()`, so a companion left in the Nether is still found — and teleports
+with `teleportTo(ServerLevel, ...)` rather than `snapTo`, because `snapTo` cannot
+cross dimensions. Companions are gathered to **per-effect** rings (escorts to 2-4,
+the Audience to its own 16-20), since dropping villagers at heel would violate
+`MIN_DISTANCE` on the arrival tick and instantly BACK_OFF all ten.
+
+**Why the hook and not the tick loop:** at the moment of the respawn the companion's
+chunk is still loaded, because the player was standing in it a fraction of a second
+earlier. That is the window the fix uses.
+
+**Stated limit:** a companion that had *already* unloaded before the event (walk 500
+blocks, then relog) still cannot be resolved — nothing records where it was, and
+there is no vanilla lookup for an unloaded UUID. It logs its own cause. The complete
+fix is to persist last-known position in the roster; not built, because the reported
+failure did not need it.
+
+#### Bug 1b — the invulnerability gap was TOTAL, not partial
+`TheEntourageBehavior.apply` called only `setPlayerCreated(true)`. **It never called
+`setInvulnerable(true)` at all** — the Audience and the llama both did. Confirmed in
+the save: golems read `Invulnerable=0` and were already damaged. `CompanionRoster`'s
+contract is "a companion that dies stays dead; for the three invulnerable effects it
+cannot arise" — so the Entourage was the one companion invulnerable *by contract* and
+mortal *in fact*. The harness now checks all three together, plus Loyal Pack's
+deliberate absence, so one cannot drift from the others again.
+
+#### Bug 2 — a state machine whose highest-priority rule made a lower one unreachable
+`CompanionMotion.audienceState` tested `canBeSeen -> FROZEN` **before**
+`distance > lostTrackDistance -> APPROACHING`, documented as "being watched stops
+them dead, **at any distance**". That sentence is the bug:
+
+**`canBeSeen` is a line-of-sight clip, not a facing test — the player need not be
+looking at the villager, or anywhere near it.** Outdoors the ray survives for as far
+as it runs, so FROZEN won at every distance and the APPROACHING branch was **dead
+code in open terrain**. Evidence: all ten villagers at **60.1-140.3 blocks**, every
+one past the 32-block threshold, none approaching, and **no death involved** — which
+is what rules the respawn hypothesis out for this symptom specifically.
+
+**Fix — the order is the whole change:** `BACK_OFF` -> `APPROACHING (lost track)` ->
+`APPROACHING (hysteresis)` -> `FROZEN` -> `IDLE`. The hysteresis clause also had to
+move above `FROZEN`: an approach that line of sight can interrupt at 25 blocks
+strands the villager in the corridor it is meant to cross. The freeze is intact
+everywhere it was actually wanted — inside the corridor — and the harness asserts it
+re-freezes on the way back in, so this reorders the freeze rather than deleting it.
+
+#### 1j. A distance-capped vanilla helper that you reimplement must keep the cap
+`SafeSpawn.hasLineOfSight` claimed in its javadoc to be "exactly the clip
+`LivingEntity.hasLineOfSight` performs". It was not. Vanilla's
+`hasLineOfSight(Entity, Block, Fluid, double)` compares `Vec3.distanceTo` against
+`ldc2_w 128.0d` and returns `iconst_0` **before clipping at all** (it also returns
+false for different levels). The reimplementation had neither gate — so it answered
+"visible" for pairs vanilla calls invisible, and paid for a 140-block ray to do it.
+Invisible at spawn distances (2-40 blocks, where the gate never fires), which is why
+it survived; it surfaced only once `CompanionService` began asking about companions
+at 137 and 140 blocks. **`MAX_SIGHT_DISTANCE = 128.0` is now applied.**
+
+#### 1k. A green harness is not evidence when the assertion was copied from the javadoc
+The most uncomfortable finding of the session. The Audience state machine shipped
+with **three explicit assertions requiring the buggy behaviour**, including verbatim:
+
+> `PASS  seen at 40 blocks -- beyond lost-track -- still FREEZES: being watched
+> outranks wanting to follow`
+
+The harness was green *because* it encoded the bug. Those assertions were written
+from the same javadoc that described the wrong design, so they tested that the code
+matched the prose — not that the prose was right. **When a component's tests are
+derived from its own doc comment they can only catch drift, never a wrong
+specification.**
+
+The counter-practice now used here: drive the regression from **observed failure
+data**. The ten real distances out of the world save (60.1 ... 140.3) and the four
+real post-respawn distances (400.9 ... 407.0) are hard-coded into the harness, so the
+reported symptom itself is the assertion and no amount of internally-consistent prose
+can make it pass again.
+
+#### The diagnostic that resolved both, and should be reached for first
+**The world save, decoded directly.** `run/logs/latest.log` proved the effects
+applied cleanly and showed the two `Re-applied 2 effect(s)` lines from the respawn —
+but it could not say whether the golems were dead or merely far away, and that
+distinction was the entire question. A ~90-line NBT/Anvil reader over
+`dimensions/*/entities/*.mca` answered it in one pass: entity present, `Health`,
+`Invulnerable`, exact position, and therefore exact distance to the player read from
+`players/data/<uuid>.dat`. **For any "my entity is gone" report, decode the region
+files before forming a hypothesis** — "alive at 400 blocks" and "dead" produce
+identical in-game symptoms and completely different fixes.
+
+Two mapping notes that cost time here, worth recording:
+- **The `javap` recipe in `entropy-mappings` names the `minecraft-clientonly-deobf`
+  jar, which does not contain `LivingEntity`, `ServerLevel` or `Level`.** Server and
+  common classes live in `minecraft-common-deobf-26.1.2.jar` in the same
+  `minecraftMaven` tree. Using the wrong jar fails as `Error: class not found`, which
+  reads like a wrong class name rather than a wrong classpath.
+- Singleplayer player data is at `<world>/players/data/<uuid>.dat` in this version —
+  not `playerdata/`, and not `level.dat`'s `Data/Player`.
