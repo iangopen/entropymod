@@ -39,8 +39,10 @@ import com.entropymod.entropy.behavior.EmotionalSupportLlamaBehavior;
 import com.entropymod.entropy.behavior.LoyalPackBehavior;
 import com.entropymod.entropy.behavior.TheAudienceBehavior;
 import com.entropymod.entropy.behavior.TheEntourageBehavior;
+import com.entropymod.entropy.companion.CompanionBuffs;
 import com.entropymod.entropy.companion.CompanionMotion;
 import com.entropymod.entropy.companion.CompanionRoster;
+import com.entropymod.entropy.companion.CompanionService;
 import com.entropymod.entropy.behavior.RandomJumpBehavior;
 import com.entropymod.entropy.behavior.UnstableBehavior;
 import com.entropymod.entropy.behavior.RandomizedControlsBehavior;
@@ -4404,17 +4406,302 @@ public final class HarnessMain {
 						+ "many samples show no progress -- the distance gate is checked "
 						+ "first and independently");
 
-		// Teleport lands inside the requested 2-4 ring.
-		checkNear(constant(CompanionMotion.class, "TELEPORT_MIN_DISTANCE"), 2.0, 1e-9,
-				"the teleport puts them down 2-4 blocks away (min)");
-		checkNear(constant(CompanionMotion.class, "TELEPORT_MAX_DISTANCE"), 4.0, 1e-9,
+		// --- the WIDENED drop ring: 6-8, not 2-4 ---------------------------------
+		// Reported in play: a companion catching up with a sprinting player sometimes
+		// lands directly in their path. The radius is the blunt half of the fix.
+		checkNear(constant(CompanionMotion.class, "TELEPORT_MIN_DISTANCE"), 6.0, 1e-9,
+				"the teleport puts them down 6-8 blocks away (min) -- widened from 2-4 so a "
+						+ "drop ahead of a sprinting player is walked TOWARD rather than "
+						+ "walked INTO");
+		checkNear(constant(CompanionMotion.class, "TELEPORT_MAX_DISTANCE"), 8.0, 1e-9,
 				"...(max)");
-		check(CompanionMotion.TELEPORT_MAX_DISTANCE < CompanionMotion.CATCH_UP_DISTANCE,
-				"...comfortably inside the catch-up threshold, so a teleport cannot land a "
-						+ "companion somewhere that immediately re-qualifies");
+		check(CompanionMotion.TELEPORT_MIN_DISTANCE > 4.0
+						&& CompanionMotion.TELEPORT_MAX_DISTANCE > 4.0,
+				"REGRESSION: the whole band is beyond the OLD band's far edge, so every "
+						+ "drop is further away than the worst case used to be");
+
+		// Warning time, at the project's own measured sprint speed. This is the
+		// quantity the complaint is actually about, so it is asserted rather than
+		// left in a javadoc.
+		double sprint = 5.6123;                 // SprintModel's vanilla sprinting figure
+		double oldWorst = 2.0 / sprint;
+		double newWorst = CompanionMotion.TELEPORT_MIN_DISTANCE / sprint;
+		check(newWorst > 1.0 && oldWorst < 0.5,
+				"worst-case warning time for a drop straight ahead goes from "
+						+ String.format("%.2f", oldWorst) + "s to "
+						+ String.format("%.2f", newWorst) + "s at a sprint -- across the "
+						+ "threshold where it stops being a surprise");
+		check(newWorst / oldWorst >= 2.9,
+				"...a " + String.format("%.1f", newWorst / oldWorst) + "x improvement, and "
+						+ "apparent size on arrival falls by the same factor since angular "
+						+ "size goes as 1/d");
+
+		// THE CEILING, and why the band cannot simply keep growing. SafeSpawn measures
+		// this band HORIZONTALLY and may move a candidate VERTICAL_SEARCH blocks up or
+		// down, so the real 3D drop distance is the hypotenuse -- and the catch-up gate
+		// is a 3D distance. If that exceeds CATCH_UP_DISTANCE a teleport can land
+		// somewhere that immediately re-qualifies for another one.
+		double worstDrop3d = Math.hypot(CompanionMotion.TELEPORT_MAX_DISTANCE,
+				com.entropymod.entropy.spawn.SafeSpawn.VERTICAL_SEARCH);
+		check(worstDrop3d < CompanionMotion.CATCH_UP_DISTANCE,
+				"THE CEILING: the worst-case 3D drop distance is "
+						+ String.format("%.2f", worstDrop3d) + " blocks (8 horizontal + "
+						+ "SafeSpawn's 8-block vertical search), still inside the "
+						+ CompanionMotion.CATCH_UP_DISTANCE + "-block catch-up gate -- so a "
+						+ "teleport cannot immediately re-qualify. A max of 9 would break "
+						+ "this");
+		check(Math.hypot(9.0, com.entropymod.entropy.spawn.SafeSpawn.VERTICAL_SEARCH)
+						>= CompanionMotion.CATCH_UP_DISTANCE,
+				"...and that bound is TIGHT rather than comfortable: 9 blocks would exceed "
+						+ "it, which is why 8 is the number and not a round-up of 6");
 
 		escortHoldBand();
 		audienceStateMachine();
+		companionBuffs();
+		audienceGatherLanding();
+		audienceLookGate();
+	}
+
+	/**
+	 * The squared-scaling speed derivation, and the two buffs built on it.
+	 *
+	 * <p>This is the check that matters most in this batch, because <b>a speed buff
+	 * 2.2x the size asked for is indistinguishable in play from one that is
+	 * correct</b> -- the same perceptual-threshold blindness that let Magnetic Boots
+	 * and the original Blight Touched ship.
+	 */
+	private static void companionBuffs() {
+		section("Companion buffs: real speed goes as the SQUARE of the attribute");
+
+		// The relationship itself, against the project's own two published figures.
+		// A golem at attribute 0.25 accelerates at 0.0625 -> 2.70 b/s; a villager at
+		// 0.5 accelerates at 0.25 -> 10.79 b/s. Four times the acceleration, four
+		// times the speed: steady-state ground speed is LINEAR in acceleration, and
+		// acceleration is the attribute SQUARED.
+		double golemAttr = 0.25;
+		double villagerAttr = 0.5;
+		checkNear((villagerAttr * villagerAttr) / (golemAttr * golemAttr), 10.79 / 2.70, 0.01,
+				"the two published mob speeds (golem 2.70 b/s at 0.25, villager 10.79 at "
+						+ "0.5) are in the ratio of the SQUARES of their attributes, which "
+						+ "is the whole basis of the derivation");
+
+		// The function, and its inverse, round-trip.
+		for (double wanted : new double[] {1.10, 1.25, 1.5, 2.0, 3.0}) {
+			double amount = CompanionBuffs.speedModifierAmount(wanted);
+			checkNear(CompanionBuffs.realSpeedMultiplier(amount), wanted, 1e-12,
+					"speedModifierAmount(" + wanted + ") = " + String.format("%.6f", amount)
+							+ " really delivers x" + wanted);
+		}
+
+		// THE TRAP: the naive multiply, stated as a number so it cannot be waved away.
+		checkNear(CompanionBuffs.realSpeedMultiplier(0.25), 1.5625, 1e-12,
+				"THE TRAP: a naive ADD_MULTIPLIED_BASE of +0.25 delivers +56.25% real "
+						+ "speed, not +25% -- more than double the buff");
+		checkNear(CompanionBuffs.realSpeedMultiplier(0.5), 2.25, 1e-12,
+				"...and a naive +0.5 delivers +125%, not +50%");
+
+		// --- The Entourage: +25% speed, x5 health --------------------------------
+		double entourageSpeed = constant(TheEntourageBehavior.class, "SPEED_MULTIPLIER");
+		checkNear(entourageSpeed, 1.25, 1e-9, "the Entourage asks for +25% real speed");
+		double entourageAmount = CompanionBuffs.speedModifierAmount(entourageSpeed);
+		checkNear(entourageAmount, 0.118033988749895, 1e-12,
+				"...which is an ADD_MULTIPLIED_BASE amount of sqrt(1.25) - 1 = "
+						+ String.format("%.6f", entourageAmount) + ", NOT 0.25");
+		checkNear(golemAttr * (1.0 + entourageAmount), 0.279508497187474, 1e-12,
+				"...giving an effective MOVEMENT_SPEED of 0.2795085 (golem base 0.25, "
+						+ "javap-verified in IronGolem.createAttributes)");
+		checkNear(2.70 * CompanionBuffs.realSpeedMultiplier(entourageAmount), 3.375, 1e-6,
+				"...i.e. 2.70 -> 3.375 blocks/second, exactly +25%");
+
+		double entourageHealth = constant(TheEntourageBehavior.class, "HEALTH_MULTIPLIER");
+		checkNear(entourageHealth, 5.0, 1e-9, "and +400% max health, read as a 5x total");
+		checkNear(100.0 * entourageHealth, 500.0, 1e-9,
+				"...so 100.0 (javap-verified golem base) becomes 500.0 -- 50 hearts to 250");
+		check(500.0 < 1024.0,
+				"...comfortably inside MAX_HEALTH's 1024.0 ceiling, so nothing is clamped "
+						+ "away");
+		check(Checks.classReferences(CompanionBuffs.class, "setHealth"),
+				"and applyMaxHealth REFILLS the bar -- raising MAX_HEALTH raises only the "
+						+ "ceiling, the same reason Brittle Bones has to clamp downward and "
+						+ "Phoenix Chambered Heart has to grant Regeneration");
+
+		// --- The Audience: +50% speed --------------------------------------------
+		double audienceSpeed = constant(TheAudienceBehavior.class, "SPEED_MULTIPLIER");
+		checkNear(audienceSpeed, 1.5, 1e-9, "the Audience asks for +50% real speed");
+		double audienceAmount = CompanionBuffs.speedModifierAmount(audienceSpeed);
+		checkNear(audienceAmount, 0.224744871391589, 1e-12,
+				"...an ADD_MULTIPLIED_BASE amount of sqrt(1.5) - 1 = "
+						+ String.format("%.6f", audienceAmount) + ", NOT 0.5");
+		checkNear(villagerAttr * (1.0 + audienceAmount), 0.612372435695794, 1e-12,
+				"...giving an effective MOVEMENT_SPEED of 0.6123724 (villager base 0.5, "
+						+ "javap-verified in Villager.createAttributes)");
+		checkNear(10.79 * CompanionBuffs.realSpeedMultiplier(audienceAmount), 16.185, 1e-6,
+				"...i.e. 10.79 -> 16.185 blocks/second, exactly +50%");
+		check(16.185 > 5.6123 * 2.8,
+				"...which is 2.88x a sprinting player (5.6123 b/s), so an approach across "
+						+ "the whole 32 -> 16 corridor now takes under a second");
+
+		// --- PERSISTENCE: permanent modifiers, the inverse of the player rule -----
+		// AttributeInstance.pack() writes baseValue and permanentModifiers only, so a
+		// TRANSIENT modifier would vanish on the first chunk unload -- and a companion's
+		// apply() never runs again (isFreshPick) to put it back.
+		check(Checks.classReferences(CompanionBuffs.class, "addOrReplacePermanentModifier"),
+				"companion buffs are PERMANENT modifiers -- the exact inverse of the "
+						+ "player-side transient rule, because a companion's apply() is "
+						+ "one-shot and there is nothing to re-derive from");
+		check(!Checks.classReferences(CompanionBuffs.class, "addOrUpdateTransientModifier"),
+				"...and NOT transient: a transient modifier on an entity whose apply() "
+						+ "never re-runs would silently disappear on the first chunk unload");
+
+		// Both behaviours actually route through the shared helper rather than
+		// computing an amount of their own.
+		check(Checks.classReferences(TheEntourageBehavior.class, "CompanionBuffs")
+						&& Checks.classReferences(TheAudienceBehavior.class, "CompanionBuffs"),
+				"both effects go through CompanionBuffs rather than each writing its own "
+						+ "sqrt -- one derivation, in one place");
+	}
+
+	/**
+	 * The Audience's gather recovery: where it lands, and whether that lands it in a
+	 * state its own machine immediately fights.
+	 */
+	private static void audienceGatherLanding() {
+		section("Audience gather: the landing spot cannot conflict with the state machine");
+
+		double minD = constant(TheAudienceBehavior.class, "MIN_DISTANCE");
+		double resume = constant(TheAudienceBehavior.class, "RESUME_DISTANCE");
+		double lost = constant(TheAudienceBehavior.class, "LOST_TRACK_DISTANCE");
+
+		// The mechanism already exists and is wired -- assert that, rather than
+		// rebuilding it. gather() runs from the same three hooks as reapplyAll.
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class,
+						"getEntityInAnyDimension"),
+				"the Audience rides the SAME gather as the escorts: cross-dimension "
+						+ "resolution, so a villager left in the Nether is still found");
+		check(Checks.classReferences(com.entropymod.EntropyMod.class, "gather"),
+				"...and it is called from the same join/respawn/dimension-change path that "
+						+ "re-applies effects");
+
+		// THE POINT OF THIS SECTION: the Audience lands on its OWN ring, not at heel.
+		check(CompanionMotion.TELEPORT_MAX_DISTANCE < minD,
+				"the escorts' drop ring (" + CompanionMotion.TELEPORT_MIN_DISTANCE + "-"
+						+ CompanionMotion.TELEPORT_MAX_DISTANCE + ") is entirely INSIDE the "
+						+ "Audience's 16-block minimum, so dropping villagers there would "
+						+ "BACK_OFF all ten on the arrival tick -- which is why the Audience "
+						+ "has its own GatherSpec");
+
+		// Every landing distance in [MIN_DISTANCE, RESUME_DISTANCE] settles quietly.
+		int conflicts = 0;
+		for (double landed = minD; landed <= resume + 1e-9; landed += 0.25) {
+			for (boolean seen : new boolean[] {true, false}) {
+				// wasApproaching is false by construction: gather() clears the villager's
+				// recorded state, so it is evaluated afresh.
+				CompanionMotion.AudienceState state = CompanionMotion.audienceState(
+						landed, seen, false, minD, resume, lost);
+				if (state == CompanionMotion.AudienceState.BACK_OFF
+						|| state == CompanionMotion.AudienceState.APPROACHING) {
+					conflicts++;
+				}
+			}
+		}
+		check(conflicts == 0,
+				"every landing distance across the whole 16-20 gather ring, seen and "
+						+ "unseen, resolves to FROZEN or IDLE (" + conflicts + " conflicts) "
+						+ "-- the villager stands still where it was put rather than "
+						+ "immediately walking somewhere else");
+
+		// SafeSpawn measures the ring HORIZONTALLY and may move a candidate up to
+		// VERTICAL_SEARCH blocks vertically, so the real 3D distance is larger. Both
+		// ends of that still have to be non-conflicting.
+		double v = com.entropymod.entropy.spawn.SafeSpawn.VERTICAL_SEARCH;
+		double worst3d = Math.hypot(resume, v);
+		check(worst3d < lost,
+				"the worst-case 3D landing distance is " + String.format("%.2f", worst3d)
+						+ " blocks (20 horizontal + SafeSpawn's 8-block vertical search), "
+						+ "still inside lost-track at " + lost + " -- so a gathered villager "
+						+ "does NOT immediately start approaching again");
+		check(Math.hypot(minD, 0.0) >= minD,
+				"...and the near end cannot fall below the minimum either, because 3D "
+						+ "distance is never less than the horizontal distance SafeSpawn "
+						+ "already bounded at " + minD);
+
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "teleportTo"),
+				"the gather uses teleportTo rather than snapTo -- snapTo cannot cross "
+						+ "dimensions and would leave the villager registered in the level "
+						+ "it came from");
+	}
+
+	/** Part 5: they watch you, and only when they are not running. */
+	private static void audienceLookGate() {
+		section("Audience: look-at-player fires outside APPROACHING only");
+
+		check(!CompanionMotion.shouldWatchPlayer(CompanionMotion.AudienceState.APPROACHING),
+				"THE GATE: a villager mid-approach does NOT stare at the player -- it looks "
+						+ "where it is going, and that is the one state with a competing "
+						+ "claim on the head");
+		check(CompanionMotion.shouldWatchPlayer(CompanionMotion.AudienceState.FROZEN),
+				"FROZEN watches -- standing dead still and staring is the effect");
+		check(CompanionMotion.shouldWatchPlayer(CompanionMotion.AudienceState.IDLE),
+				"IDLE watches");
+		check(CompanionMotion.shouldWatchPlayer(CompanionMotion.AudienceState.BACK_OFF),
+				"and BACK_OFF watches -- retreating while never breaking eye contact is "
+						+ "the theme, not an exception to it");
+
+		// Exhaustive, so a state added later has to be considered rather than defaulting.
+		int watching = 0;
+		for (CompanionMotion.AudienceState state : CompanionMotion.AudienceState.values()) {
+			if (CompanionMotion.shouldWatchPlayer(state)) {
+				watching++;
+			}
+		}
+		check(watching == CompanionMotion.AudienceState.values().length - 1,
+				"exactly one of the " + CompanionMotion.AudienceState.values().length
+						+ " states declines to watch");
+
+		// --- THE MECHANISM: the brain's channel, not LookControl -------------------
+		// LookAtTargetSink runs inside Brain.tick at offset 192 of Mob.serverAiStep,
+		// and LookControl.tick -- the only consumer -- runs at offset 239. This service
+		// runs on END_SERVER_TICK, after both. So a direct setLookAt from here is
+		// overwritten before it is ever read, for as long as the brain holds a
+		// LOOK_TARGET -- which for ten villagers spawned within each other's 8-block
+		// look range is essentially always.
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "LOOK_TARGET"),
+				"THE MECHANISM: the look is written into the brain's own LOOK_TARGET "
+						+ "memory, so vanilla's LookAtTargetSink performs the rotation");
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "EntityTracker"),
+				"...as an EntityTracker on the player, tracking eye height so they look at "
+						+ "your face");
+		check(!Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "getLookControl"),
+				"REFUTED ROUTE: the service does NOT call getLookControl/setLookAt. That "
+						+ "loses to the brain at offset 192 every tick a LOOK_TARGET exists "
+						+ "-- the same failure as adding a follow Goal to a brain-driven mob, "
+						+ "reached by a different route");
+
+		// The look pass must NOT be gated by the 5-tick movement cadence.
+		check(CompanionService.TICK_INTERVAL == 5,
+				"the movement pass stays on its 5-tick cadence");
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "audienceLook"),
+				"...but the look pass is a separate method off the cadence gate, because "
+						+ "our write owns the "
+						+ "memory for exactly ONE following tick before a competitor may "
+						+ "reclaim it -- a 1-in-5 refresh would lose the look four ticks in "
+						+ "five, which at LookControl's gradual turn rate is "
+						+ "indistinguishable from the feature not working");
+
+		// The consequence of pointing LOOK_TARGET at the player, and its containment.
+		check(Checks.classReferences(
+						com.entropymod.entropy.companion.CompanionService.class, "WALK_TARGET"),
+				"and the one side effect is contained: SetWalkTargetFromLookTarget is a "
+						+ "member of the villager's IDLE RunOne (javap-verified in "
+						+ "VillagerGoalPackages), so a player look target occasionally makes "
+						+ "the brain walk to within 2 blocks -- erased in BACK_OFF, where "
+						+ "that is unambiguously wrong, and left alone everywhere else");
 	}
 
 	/** The Entourage's 3-5 band: converges, and does not oscillate. */

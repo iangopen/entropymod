@@ -63,9 +63,39 @@ public final class CompanionMotion {
 	/** Consecutive failing samples before a companion is considered stalled. */
 	public static final int STALL_SAMPLES = 3;
 
-	/** Where a caught-up companion is put down, via {@code SafeSpawn}. */
-	public static final double TELEPORT_MIN_DISTANCE = 2.0;
-	public static final double TELEPORT_MAX_DISTANCE = 4.0;
+	/**
+	 * Where a caught-up companion is put down, via {@code SafeSpawn}.
+	 *
+	 * <h2>Widened from 2-4 to 6-8: the complaint was ARRIVAL, not distance</h2>
+	 *
+	 * <p>Reported in play: a companion catching up with a sprinting player sometimes
+	 * lands directly in their path and appears abruptly in front of them. At 2-4
+	 * blocks a sprinting player (5.61 b/s) closes a drop straight ahead in
+	 * <b>0.36 to 0.71 seconds</b> -- inside the time it takes to notice it -- and an
+	 * iron golem 2 blocks away fills a large part of the screen at the instant it
+	 * appears. At 6-8 the same drop gives <b>1.07 to 1.43 seconds</b>, so it is
+	 * something walked toward rather than something walked into, and the golem's
+	 * apparent size on arrival falls to roughly a quarter (angular size goes as
+	 * {@code 1/d}, so 2 -> 7 blocks is about a 3.5x reduction).
+	 *
+	 * <p><b>Stated honestly: this reduces the problem, it does not remove it.</b> The
+	 * drop angle is drawn uniformly, so a quarter of teleports still land in the
+	 * 90-degree cone ahead of the player whatever the radius is; widening buys warning
+	 * time and apparent size, not a different distribution. The targeted fix is a
+	 * directional bias in the position search -- see {@code SafeSpawn} -- and it is
+	 * proposed rather than shipped here so that this change can be judged on its own
+	 * in play.
+	 *
+	 * <p>The upper bound cannot simply keep growing. {@code SafeSpawn} measures this
+	 * band <b>horizontally</b> and may move a candidate up to {@code VERTICAL_SEARCH}
+	 * = 8 blocks vertically, so a drop at the far edge can be
+	 * {@code sqrt(8^2 + 8^2) = 11.31} blocks away in 3D -- and the catch-up gate is
+	 * itself a 3D distance of {@link #CATCH_UP_DISTANCE} = 12. <b>8 leaves 0.69 blocks
+	 * of margin; 9 would not, and a teleport could land somewhere that immediately
+	 * re-qualifies for another.</b> That is asserted in the harness.
+	 */
+	public static final double TELEPORT_MIN_DISTANCE = 6.0;
+	public static final double TELEPORT_MAX_DISTANCE = 8.0;
 
 	private CompanionMotion() {}
 
@@ -323,5 +353,22 @@ public final class CompanionMotion {
 			return AudienceState.FROZEN;
 		}
 		return AudienceState.IDLE;
+	}
+
+	/**
+	 * Whether an audience villager in this state should be turned to face the player.
+	 *
+	 * <p><b>Everything except {@link AudienceState#APPROACHING}.</b> A villager
+	 * mid-approach looks where it is going -- pointing its head at the player while it
+	 * runs reads as a bug rather than as menace, and it is the one state with a
+	 * competing claim on the head. Settled after backing off, frozen, and idle are all
+	 * states in which standing still and staring is exactly the effect.
+	 *
+	 * <p>Trivial as a function, and it exists as one anyway: it is the rule the
+	 * harness can drive, where the mechanism it gates ({@code LOOK_TARGET}) needs a
+	 * live brain. Same split as every other decision in this class.
+	 */
+	public static boolean shouldWatchPlayer(AudienceState state) {
+		return state != AudienceState.APPROACHING;
 	}
 }

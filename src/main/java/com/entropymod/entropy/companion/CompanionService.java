@@ -14,10 +14,13 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.ai.behavior.EntityTracker;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.phys.Vec3;
 
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -71,15 +74,22 @@ public final class CompanionService {
 	/** Distance history for the catch-up teleport, keyed by entity UUID string. */
 	private static final CompanionMotion.StallTracker STALLS = new CompanionMotion.StallTracker();
 
-	/** Which audience villagers were approaching last evaluation -- for hysteresis. */
-	private static final Set<String> APPROACHING = new HashSet<>();
+	/**
+	 * Each audience villager's state at the last movement evaluation.
+	 *
+	 * <p>Two readers, which is why it is a state rather than the boolean set it used
+	 * to be: {@code audience} needs {@code wasApproaching} for hysteresis, and
+	 * {@code audienceLook} -- which runs on every tick, between movement evaluations --
+	 * needs the whole state to ask {@link CompanionMotion#shouldWatchPlayer}. Keeping
+	 * the real state means the look gate is driven by the state machine rather than by
+	 * a second, parallel notion of "is it running".
+	 */
+	private static final Map<String, CompanionMotion.AudienceState> AUDIENCE_STATE =
+			new HashMap<>();
 
 	private CompanionService() {}
 
 	public static void tick(MinecraftServer server) {
-		if (server.getTickCount() % TICK_INTERVAL != 0) {
-			return;
-		}
 		EntropyManager manager = EntropyManager.get(server);
 		boolean pack = manager.acquired().contains(LoyalPackBehavior.ID);
 		boolean entourage = manager.acquired().contains(TheEntourageBehavior.ID);
@@ -89,6 +99,10 @@ public final class CompanionService {
 			return;
 		}
 
+		// The movement pass is the expensive one and stays on the 5-tick cadence. The
+		// Audience's look pass runs EVERY tick and is deliberately not gated by it --
+		// see audienceLook for why a 1-in-5 refresh would lose the look outright.
+		boolean movementPass = server.getTickCount() % TICK_INTERVAL == 0;
 		boolean stallSample = server.getTickCount() % CompanionMotion.STALL_SAMPLE_INTERVAL == 0;
 		CompanionRoster roster = manager.companions();
 
@@ -96,27 +110,32 @@ public final class CompanionService {
 			if (player.isSpectator()) {
 				continue;
 			}
-			// Catch-up applies to the three FOLLOWING effects. The Audience is
-			// excluded by design: it is supposed to lose track of the player and
-			// wander, so teleporting it to heel would delete the effect.
-			if (pack) {
-				catchUp(player, roster, LoyalPackBehavior.ID, stallSample);
-			}
-			if (entourage) {
-				catchUp(player, roster, TheEntourageBehavior.ID, stallSample);
-				holdBand(player, roster, TheEntourageBehavior.ID,
-						TheEntourageBehavior.MIN_HOLD, TheEntourageBehavior.MAX_HOLD,
-						TheEntourageBehavior.FOLLOW_SPEED, true);
-			}
-			if (llama) {
-				catchUp(player, roster, EmotionalSupportLlamaBehavior.ID, stallSample);
-				holdBand(player, roster, EmotionalSupportLlamaBehavior.ID,
-						EmotionalSupportLlamaBehavior.MIN_HOLD,
-						EmotionalSupportLlamaBehavior.MAX_HOLD,
-						EmotionalSupportLlamaBehavior.FOLLOW_SPEED, false);
+			if (movementPass) {
+				// Catch-up applies to the three FOLLOWING effects. The Audience is
+				// excluded by design: it is supposed to lose track of the player and
+				// wander, so teleporting it to heel would delete the effect.
+				if (pack) {
+					catchUp(player, roster, LoyalPackBehavior.ID, stallSample);
+				}
+				if (entourage) {
+					catchUp(player, roster, TheEntourageBehavior.ID, stallSample);
+					holdBand(player, roster, TheEntourageBehavior.ID,
+							TheEntourageBehavior.MIN_HOLD, TheEntourageBehavior.MAX_HOLD,
+							TheEntourageBehavior.FOLLOW_SPEED, true);
+				}
+				if (llama) {
+					catchUp(player, roster, EmotionalSupportLlamaBehavior.ID, stallSample);
+					holdBand(player, roster, EmotionalSupportLlamaBehavior.ID,
+							EmotionalSupportLlamaBehavior.MIN_HOLD,
+							EmotionalSupportLlamaBehavior.MAX_HOLD,
+							EmotionalSupportLlamaBehavior.FOLLOW_SPEED, false);
+				}
+				if (audience) {
+					audience(player, roster);
+				}
 			}
 			if (audience) {
-				audience(player, roster);
+				audienceLook(player, roster);
 			}
 		}
 	}
@@ -124,7 +143,7 @@ public final class CompanionService {
 	/** Drops all transient movement state. Called on server stop. */
 	public static void reset() {
 		STALLS.reset();
-		APPROACHING.clear();
+		AUDIENCE_STATE.clear();
 	}
 
 	// ==================================================================
@@ -220,7 +239,7 @@ public final class CompanionService {
 				// exists. Leaving them would measure the next sample against a gap from
 				// before the teleport.
 				STALLS.forget(id);
-				APPROACHING.remove(id);
+				AUDIENCE_STATE.remove(id);
 				moved++;
 			}
 		}
@@ -338,7 +357,7 @@ public final class CompanionService {
 		for (String id : ids) {
 			Entity entity = level.getEntity(UUID.fromString(id));
 			if (!(entity instanceof Mob villager) || !villager.isAlive()) {
-				APPROACHING.remove(id);
+				AUDIENCE_STATE.remove(id);
 				continue;
 			}
 
@@ -350,15 +369,12 @@ public final class CompanionService {
 			boolean seen = SafeSpawn.hasLineOfSight(level, player, eye, villager.getEyePosition());
 
 			CompanionMotion.AudienceState state = CompanionMotion.audienceState(
-					distance, seen, APPROACHING.contains(id),
+					distance, seen,
+					AUDIENCE_STATE.get(id) == CompanionMotion.AudienceState.APPROACHING,
 					TheAudienceBehavior.MIN_DISTANCE, TheAudienceBehavior.RESUME_DISTANCE,
 					TheAudienceBehavior.LOST_TRACK_DISTANCE);
 
-			if (state == CompanionMotion.AudienceState.APPROACHING) {
-				APPROACHING.add(id);
-			} else {
-				APPROACHING.remove(id);
-			}
+			AUDIENCE_STATE.put(id, state);
 
 			switch (state) {
 				case FROZEN, IDLE -> {
@@ -369,10 +385,97 @@ public final class CompanionService {
 						villager.getNavigation().stop();
 					}
 				}
-				case APPROACHING, BACK_OFF ->
+				case BACK_OFF -> {
+					// The one place the brain's own walk target is overruled, and it is
+					// a direct consequence of the look pass: SetWalkTargetFromLookTarget
+					// is a member of the villager's IDLE RunOne (javap-verified in
+					// VillagerGoalPackages.getIdlePackage), so pointing LOOK_TARGET at
+					// the player occasionally makes the brain decide to WALK to within
+					// 2 blocks of them. Inside the minimum distance that is unambiguously
+					// wrong for this effect, and leaving it would be a visible tug of war
+					// against the ring navigation issued on the next line. Scoped to
+					// BACK_OFF only -- everywhere else the brain keeps its errands.
+					villager.getBrain().eraseMemory(MemoryModuleType.WALK_TARGET);
+					moveToRing(villager, player, TheAudienceBehavior.MIN_DISTANCE,
+							TheAudienceBehavior.FOLLOW_SPEED);
+				}
+				case APPROACHING ->
 						moveToRing(villager, player, TheAudienceBehavior.MIN_DISTANCE,
 								TheAudienceBehavior.FOLLOW_SPEED);
 			}
+		}
+	}
+
+	/**
+	 * Points every non-approaching audience villager at the player -- the "watching
+	 * you" half of the effect.
+	 *
+	 * <h2>LookControl does NOT persist against the brain. Verified by offset.</h2>
+	 *
+	 * <p>The obvious implementation is {@code villager.getLookControl().setLookAt(player)}
+	 * from this service, and <b>it loses</b> -- the same class of failure as adding a
+	 * follow {@code Goal} to a brain-driven mob, reached by a different route. Inside
+	 * {@code Mob.serverAiStep()}, javap-verified by offset:
+	 *
+	 * <table border="1">
+	 *   <caption>Order within one entity tick</caption>
+	 *   <tr><th>offset</th><th>call</th></tr>
+	 *   <tr><td>166</td><td>{@code PathNavigation.tick}</td></tr>
+	 *   <tr><td><b>192</b></td><td>{@code customServerAiStep} -> {@code Brain.tick}
+	 *       -> <b>{@code LookAtTargetSink}</b>, which is
+	 *       {@code getLookControl().setLookAt(lookTarget.currentPosition())}</td></tr>
+	 *   <tr><td>223</td><td>{@code MoveControl.tick}</td></tr>
+	 *   <tr><td><b>239</b></td><td><b>{@code LookControl.tick}</b> -- the only consumer
+	 *       of what was set</td></tr>
+	 * </table>
+	 *
+	 * <p>This service runs on {@code END_SERVER_TICK}, i.e. after offset 239. So a
+	 * direct {@code setLookAt} here is overwritten at offset 192 of the <em>next</em>
+	 * tick, before offset 239 ever reads it, for as long as the brain holds a
+	 * {@code LOOK_TARGET}. And it holds one constantly: {@code LookAtTargetSink} is
+	 * registered in the villager's <b>core</b> package (so it runs in every activity),
+	 * and {@code SetEntityLookTarget} / {@code SetLookAndInteract} feed it -- with ten
+	 * villagers spawned as a group they are permanently within each other's 8-block
+	 * look range.
+	 *
+	 * <p><b>So the look is written into {@code LOOK_TARGET} itself.</b> Same pattern as
+	 * Green Thumb: drive the schedule yourself, perform the change through vanilla's
+	 * own transition. {@code LookAtTargetSink} then does the actual rotation, on the
+	 * brain's own tick, with vanilla's gradual turn rate -- there is nothing left to
+	 * fight.
+	 *
+	 * <p><b>Every tick, not every {@value #TICK_INTERVAL}.</b> Our write lands after
+	 * the brain tick, so it owns the memory for exactly the next tick before a
+	 * competitor may reclaim it. Refreshing only every fifth tick would hand the look
+	 * to another villager for four ticks in five, which at {@code LookControl}'s
+	 * gradual turn rate is indistinguishable from the feature not working. The cost is
+	 * one map lookup and one memory write per villager per tick.
+	 *
+	 * <p>{@code EntityTracker(player, true)} tracks the player's <em>eye</em> height,
+	 * so they look at your face rather than your feet.
+	 */
+	private static void audienceLook(ServerPlayer player, CompanionRoster roster) {
+		List<String> ids = roster.uuidsFor(player.getUUID().toString(), TheAudienceBehavior.ID);
+		if (ids.isEmpty()) {
+			return;
+		}
+		ServerLevel level = player.level();
+		for (String id : ids) {
+			// The gate, driven by the state machine itself rather than by a second
+			// notion of "is it running": a villager mid-approach looks where it is
+			// going, and FROZEN, IDLE and BACK_OFF all watch the player. A villager
+			// with no recorded state yet has not been evaluated, so it watches.
+			CompanionMotion.AudienceState state =
+					AUDIENCE_STATE.getOrDefault(id, CompanionMotion.AudienceState.IDLE);
+			if (!CompanionMotion.shouldWatchPlayer(state)) {
+				continue;
+			}
+			Entity entity = level.getEntity(UUID.fromString(id));
+			if (!(entity instanceof Mob villager) || !villager.isAlive()) {
+				continue;
+			}
+			villager.getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
+					new EntityTracker(player, true));
 		}
 	}
 

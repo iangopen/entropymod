@@ -3,6 +3,7 @@ package com.entropymod.entropy.behavior;
 import com.entropymod.entropy.EffectBehavior;
 import com.entropymod.entropy.EffectContext;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.companion.CompanionBuffs;
 import com.entropymod.entropy.companion.CompanionSpawner;
 import net.minecraft.world.entity.EntityType;
 
@@ -67,9 +68,18 @@ import java.util.List;
  * spawned unemployed, and an unemployed villager has no trades to offer, so
  * "no trading" falls out of the spawn state rather than needing enforcement.
  *
- * <p>{@link #FOLLOW_START} is deliberately large and {@link #FOLLOW_SPEED}
- * deliberately below a walk: they are meant to loiter at the edge of vision, not
- * crowd the player.
+ * <p>{@link #LOST_TRACK_DISTANCE} is deliberately large and
+ * {@link #MIN_DISTANCE} deliberately far: they are meant to loiter at the edge of
+ * vision, not crowd the player. (The old {@code FOLLOW_START} this paragraph used
+ * to name was deleted with the crowding fix; see {@code CompanionService}.)
+ *
+ * <h2>They watch you: LOOK_TARGET, not LookControl</h2>
+ *
+ * <p>Whenever a villager is not actively running an approach, it is pointed at the
+ * player. <b>That is done through the brain's own {@code LOOK_TARGET} memory rather
+ * than through {@code LookControl.setLookAt}</b>, for exactly the reason the
+ * following had to be a tick service rather than a Goal -- see
+ * {@code CompanionService.audienceLook} for the offset-level evidence.
  */
 public final class TheAudienceBehavior implements EffectBehavior {
 
@@ -128,6 +138,32 @@ public final class TheAudienceBehavior implements EffectBehavior {
 	 */
 	public static final double FOLLOW_SPEED = 1.0;
 
+	/**
+	 * Real movement speed as a multiple of a stock villager's: <b>+50%</b>.
+	 *
+	 * <p>A villager's {@code MOVEMENT_SPEED} is <b>0.5</b> (javap-verified in
+	 * {@code Villager.createAttributes}), which at navigation modifier 1.0 gives
+	 * ground acceleration {@code 0.5^2 = 0.25} and the shipped <b>10.79
+	 * blocks/second</b>. The target is <b>16.185 b/s</b>, needing acceleration
+	 * {@code 0.375}, i.e. an effective attribute of {@code sqrt(0.375) = 0.6123724}.
+	 *
+	 * <p><b>That is 0.5 x 1.224745, not 0.5 x 1.5.</b> Real speed goes as the SQUARE
+	 * of the attribute, so the naive multiply would give accel {@code 0.75^2 = 0.5625}
+	 * -> 24.3 b/s, <b>+125%</b> -- two and a half times the buff asked for, and at
+	 * that point they genuinely would read as teleporting. The derivation lives once,
+	 * in {@code CompanionBuffs.speedModifierAmount}.
+	 *
+	 * <p>The buff is on the <em>attribute</em> rather than on {@link #FOLLOW_SPEED},
+	 * which also keeps the villager's brain-driven movement (strolling, panicking,
+	 * errands) at the same new speed as the approaches this mod issues -- one figure
+	 * rather than two that can disagree.
+	 *
+	 * <p>For scale: 16.185 b/s is <b>3.75x a walking player</b> (4.3172) and
+	 * <b>2.88x a sprinting one</b> (5.6123). Closing the full 32 -> 16 approach
+	 * corridor now takes under a second.
+	 */
+	public static final double SPEED_MULTIPLIER = 1.5;
+
 	@Override
 	public void apply(EffectContext ctx) {
 		if (!ctx.isFreshPick()) {
@@ -141,6 +177,8 @@ public final class TheAudienceBehavior implements EffectBehavior {
 					// No baby villagers in the audience -- they move differently and read
 					// as a different effect.
 					villager.setBaby(false);
+					// Permanent, not transient -- see CompanionBuffs.
+					CompanionBuffs.applySpeed(villager, ID, SPEED_MULTIPLIER);
 				});
 		manager.recordCompanions(ctx.target(), ID, spawned);
 	}

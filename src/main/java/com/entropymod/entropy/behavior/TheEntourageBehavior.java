@@ -3,6 +3,7 @@ package com.entropymod.entropy.behavior;
 import com.entropymod.entropy.EffectBehavior;
 import com.entropymod.entropy.EffectContext;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.companion.CompanionBuffs;
 import com.entropymod.entropy.companion.CompanionSpawner;
 import net.minecraft.world.entity.EntityType;
 
@@ -86,8 +87,48 @@ public final class TheEntourageBehavior implements EffectBehavior {
 	 */
 	public static final double MAX_HOLD = 5.0;
 
-	/** Navigation speed multiplier. 1.0 is a golem's flat-out ~2.70 blocks/second. */
+	/** Navigation speed multiplier. 1.0 is a golem's flat-out speed, whatever it is. */
 	public static final double FOLLOW_SPEED = 1.0;
+
+	/**
+	 * Real movement speed as a multiple of a stock iron golem's: <b>+25%</b>.
+	 *
+	 * <p>A golem's {@code MOVEMENT_SPEED} is 0.25, which at navigation modifier 1.0
+	 * gives ground acceleration {@code 0.25^2 = 0.0625} and <b>2.70 blocks/second</b>.
+	 * The target is <b>3.375 b/s</b>, needing acceleration {@code 0.078125}, i.e. an
+	 * effective attribute of {@code sqrt(0.078125) = 0.2795085}.
+	 *
+	 * <p><b>That is 0.25 x 1.118034, not 0.25 x 1.25.</b> Real speed goes as the
+	 * SQUARE of the attribute (CLAUDE.md 1e), so the naive multiply would have
+	 * delivered accel {@code 0.3125^2 = 0.09766} -> 4.22 b/s, <b>+56.3%</b> -- more
+	 * than double the buff asked for, and undetectable without a stopwatch. The
+	 * derivation lives once, in {@code CompanionBuffs.speedModifierAmount}.
+	 *
+	 * <p>Note the buff is on the <em>attribute</em>, not on {@link #FOLLOW_SPEED}: the
+	 * navigation modifier only applies to the paths this mod issues, while the
+	 * attribute also covers the golem's own {@code MeleeAttackGoal} pursuit, which is
+	 * where an escort's speed matters most.
+	 */
+	public static final double SPEED_MULTIPLIER = 1.25;
+
+	/**
+	 * Maximum health as a multiple of a stock iron golem's: <b>+400%, i.e. 5x</b>.
+	 *
+	 * <p>An iron golem's {@code MAX_HEALTH} is <b>100.0</b> (50 hearts), so this ships
+	 * <b>500.0</b> -- comfortably inside the attribute's 1024.0 ceiling, so nothing is
+	 * clamped away. {@code CompanionBuffs.applyMaxHealth} refills the bar, because
+	 * raising the ceiling does not raise current health.
+	 *
+	 * <p><b>Flagged rather than silently reconciled: the golems are also
+	 * {@code setInvulnerable(true)}</b>, which was added in the previous session to
+	 * honour {@code CompanionRoster}'s "a companion that dies stays dead" contract. So
+	 * 500 HP is presently unreachable in play -- it is insurance for the day
+	 * invulnerability is reconsidered, not a change the player can feel today. The
+	 * "+400%" reading is the one asked for (new total = 5x); the other candidate
+	 * reading, +400 flat, would give 500.0 as well by coincidence of the base being
+	 * 100, so no interpretation is at risk here.
+	 */
+	public static final double HEALTH_MULTIPLIER = 5.0;
 
 	@Override
 	public void apply(EffectContext ctx) {
@@ -110,6 +151,13 @@ public final class TheEntourageBehavior implements EffectBehavior {
 					// Confirmed from a world save: shipped golems read Invulnerable=0 and
 					// were already down to 94-97 of 100 HP.
 					golem.setInvulnerable(true);
+					// PERMANENT modifiers, not transient: this apply() runs once and
+					// never again (isFreshPick), so a transient modifier would vanish
+					// on the first chunk unload with nothing to re-derive it from.
+					// See CompanionBuffs for that inversion of the player-side rule,
+					// and for why the speed amount is sqrt-derived.
+					CompanionBuffs.applySpeed(golem, ID, SPEED_MULTIPLIER);
+					CompanionBuffs.applyMaxHealth(golem, ID, HEALTH_MULTIPLIER);
 				});
 		manager.recordCompanions(ctx.target(), ID, spawned);
 	}

@@ -3567,3 +3567,182 @@ Two mapping notes that cost time here, worth recording:
   reads like a wrong class name rather than a wrong classpath.
 - Singleplayer player data is at `<world>/players/data/<uuid>.dat` in this version —
   not `playerdata/`, and not `level.dat`'s `Data/Player`.
+
+---
+
+### The companion buff/watch batch — four findings, two of them general rules
+
+#### 1l. TO BUFF A MOB'S SPEED BY x, MULTIPLY ITS ATTRIBUTE BY sqrt(x)
+The most reusable number in this batch, and the one that would have shipped wrong in
+a way nothing in the build could catch.
+
+Finding 1e already recorded that **a mob's ground acceleration is its
+`MOVEMENT_SPEED` squared** — `Mob.setSpeed(f)` calls `super.setSpeed(f)` *and*
+`setZza(f)`, so the forward *input* is the speed value where a player's is a
+normalised 1.0, and `moveRelative` multiplies the two. The consequence for *tuning*
+was never drawn, and it is the whole story:
+
+- Steady-state ground speed is **linear in acceleration** (`v <- 0.546 v + a`
+  converges to `a / 0.454`).
+- Acceleration is the attribute **squared**.
+- Therefore **real b/s goes as the square of the attribute**, and the attribute
+  multiplier wanted for a real speed multiplier `m` is `sqrt(m)`.
+
+The project's own two published figures confirm the shape rather than assume it: a
+golem at attribute 0.25 accelerates at 0.0625 and reaches **2.70 b/s**; a villager at
+0.5 accelerates at 0.25 and reaches **10.79 b/s** — 4x the acceleration, 4x the speed,
+exactly.
+
+| wanted | naive attribute x | what it really delivers | derived attribute x | delivers |
+|---|---|---|---|---|
+| **+25%** (Entourage) | 1.25 | **+56.25%** | **1.118034** | +25.0% |
+| **+50%** (Audience) | 1.50 | **+125.0%** | **1.224745** | +50.0% |
+
+**The naive form overshoots by roughly the buff again**, and the error is invisible:
+"the golems feel faster" is true either way, and nobody times a mob with a stopwatch.
+Same perceptual-threshold blindness that shipped Magnetic Boots at 1.5x and the first
+Blight Touched.
+
+`CompanionBuffs.speedModifierAmount(m) = sqrt(m) - 1` holds the derivation once and is
+**Minecraft-free**, so the harness drives it — including the inverse round trip and
+both naive-form traps as explicit assertions.
+
+**The two shipped buffs, worked through:**
+
+| | base attr | base b/s | target b/s | needed accel | effective attr | `ADD_MULTIPLIED_BASE` |
+|---|---|---|---|---|---|---|
+| Entourage golems | 0.25 | 2.70 | **3.375** | 0.078125 | **0.2795085** | **+0.118033989** |
+| Audience villagers | 0.50 | 10.79 | **16.185** | 0.375 | **0.6123724** | **+0.224744871** |
+
+Both bases are javap-verified in `IronGolem.createAttributes` (MAX_HEALTH 100.0,
+MOVEMENT_SPEED 0.25, ATTACK_DAMAGE 15.0, KNOCKBACK_RESISTANCE 1.0, STEP_HEIGHT 1.0)
+and `Villager.createAttributes` (MOVEMENT_SPEED 0.5). 16.185 b/s is **2.88x a
+sprinting player**, so the Audience now crosses its whole 32→16 corridor in under a
+second.
+
+**Buff the attribute, not the navigation `speedModifier`.** The modifier only applies
+to paths this mod issues; the attribute also covers the golem's own `MeleeAttackGoal`
+pursuit and the villager's brain-driven strolling — one figure rather than two that
+can disagree.
+
+#### 1m. For a SPAWNED companion the attribute rule INVERTS: permanent, not transient
+Every player effect applies modifiers **transiently**, deliberately, so
+`AcquiredEffects` stays the single source of truth. **Companions are the exact
+opposite and the rule must be inverted, not copied.** Their `apply` is gated on
+`isFreshPick()` and never runs again, so there is nothing to re-derive a transient
+modifier from — it would vanish on the first chunk unload with no hook to restore it.
+
+`AttributeInstance.pack()` writes **`baseValue` and `permanentModifiers` and nothing
+else** (javap-verified), and that packed list is ordinary entity NBT saved with the
+chunk. So `addOrReplacePermanentModifier` persists and `addOrUpdateTransientModifier`
+does not. A modifier rather than `setBaseValue` because the `Identifier` keeps the
+buff attributable and makes re-application replace rather than stack.
+
+Also: `applyMaxHealth` must **refill the bar**. Raising `MAX_HEALTH` raises the
+ceiling only — same reason Brittle Bones clamps downward and Phoenix Chambered Heart
+grants Regeneration alongside Health Boost. A 500 HP golem would otherwise spawn at
+100/500.
+
+**Flagged, not reconciled:** the Entourage's 500 HP is currently unreachable because
+the golems are also `setInvulnerable(true)`. It is insurance for the day
+invulnerability is reconsidered, not something the player can feel today. Note also
+that the requested "+400%" and a "+400 flat" reading coincide at 500.0 here, because
+the base happens to be 100 — so no interpretation was at risk.
+
+#### 1n. `LookControl.setLookAt` LOSES to a brain, and the offsets say so
+Part 5's investigation, and it is failure mode 1 (something else overrides what you
+targeted) reached by yet another route — this time without a mixin *or* a `Goal`.
+
+The obvious implementation of "the villagers turn to watch you" is
+`villager.getLookControl().setLookAt(player)` from a tick service. **It does not
+persist.** Inside `Mob.serverAiStep()`, javap-verified by offset:
+
+| offset | call |
+|---|---|
+| 166 | `PathNavigation.tick` |
+| **192** | `customServerAiStep` → `Brain.tick` → **`LookAtTargetSink`**, whose entire tick is `getLookControl().setLookAt(lookTarget.currentPosition())` |
+| 223 | `MoveControl.tick` |
+| **239** | **`LookControl.tick`** — the only consumer of what was set |
+
+A service on `END_SERVER_TICK` runs after 239, so its `setLookAt` is **overwritten at
+offset 192 of the next tick, before offset 239 ever reads it**, for as long as the
+brain holds a `LOOK_TARGET`. And it essentially always does: `LookAtTargetSink` is
+registered in the villager's **core** package (so it runs in every activity), and
+`SetEntityLookTarget` / `SetLookAndInteract` feed it — ten villagers spawned as a
+group are permanently inside each other's 8-block look range.
+
+**So write `MemoryModuleType.LOOK_TARGET` instead**, as
+`new EntityTracker(player, true)` (eye height — they look at your face). Same pattern
+as Green Thumb: *drive the schedule yourself, perform the change through vanilla's own
+transition.* `LookAtTargetSink` then does the rotation on the brain's own tick with
+vanilla's gradual turn rate, and there is nothing left to fight.
+
+**Refresh EVERY tick, not on the 5-tick movement cadence.** The write lands after the
+brain tick, so it owns the memory for exactly the *next* tick before a competitor may
+reclaim it. A 1-in-5 refresh hands the look to another villager four ticks in five,
+which at `LookControl`'s gradual turn rate is indistinguishable from the feature not
+working. Cost is one map lookup and one memory write per villager per tick.
+
+**The one side effect, and its containment.** `SetWalkTargetFromLookTarget` is a
+member of the villager's **idle** `RunOne` (javap-verified in
+`VillagerGoalPackages.getIdlePackage`, and again in `getPlayPackage`), so pointing
+`LOOK_TARGET` at the player occasionally makes the brain decide to *walk* to within 2
+blocks of them. `CompanionService` erases `WALK_TARGET` **in `BACK_OFF` only** — the
+one state where the brain wanting to close is unambiguously wrong for the effect — and
+leaves the brain's errands alone everywhere else.
+
+**Gate: everything except `APPROACHING`.** A villager mid-approach looks where it is
+going; that is the one state with a competing claim on the head. The gate is
+`CompanionMotion.shouldWatchPlayer(AudienceState)` — trivial as a function and written
+as one anyway, because it is the rule the harness can drive where the mechanism needs
+a live brain. `CompanionService`'s approach-tracking `Set<String>` became a
+`Map<String, AudienceState>` for the same reason: the look gate is driven by the state
+machine itself rather than by a second, parallel notion of "is it running".
+
+#### 1o. Widening a teleport radius buys warning time, not a different distribution
+The catch-up drop ring went **2-4 → 6-8 blocks**, against the report that companions
+sometimes teleport into a sprinting player's path and appear abruptly in front.
+
+| | old (2-4) | new (6-8) |
+|---|---|---|
+| worst-case warning at a sprint (5.6123 b/s) | **0.36 s** | **1.07 s** |
+| best case | 0.71 s | 1.43 s |
+| apparent size on arrival (goes as `1/d`) | baseline | **~3.5x smaller** |
+
+**Stated honestly, and this is the durable part: the drop angle is drawn uniformly, so
+a quarter of teleports still land in the 90° cone ahead whatever the radius is.**
+Widening buys reaction time and reduces the startle; it does not change *how often* a
+companion appears ahead. **The targeted fix is a directional bias in `SafeSpawn`'s
+angle draw** — re-draw candidates whose bearing is within ~60° of the player's
+yaw/velocity heading, spending a few of the existing `ATTEMPTS` on it and falling back
+to any valid spot rather than failing. That addresses the distribution rather than the
+magnitude. **Proposed, not shipped**, deliberately: shipping both at once makes the
+in-game test unable to say which one worked.
+
+**There is a hard ceiling on the radius and it is close.** `SafeSpawn` measures this
+band **horizontally** and may move a candidate up to `VERTICAL_SEARCH = 8` blocks
+vertically, while the catch-up gate is a **3D** distance of 12. So the worst-case real
+drop distance is `hypot(8, 8) = 11.31` — **0.69 blocks of margin.** A maximum of 9
+would give `hypot(9, 8) = 12.04`, and a teleport could land somewhere that immediately
+re-qualifies for another. Asserted in both directions.
+
+**Consequence worth knowing:** escorts are now dropped *outside* the Entourage's 3-5
+hold band, so a caught-up golem walks in from 6-8 to the 4-block ring instead of
+arriving in band. At the new 3.375 b/s that is about a second, and it reads better
+than materialising at heel.
+
+#### The Audience's gather recovery was ALREADY BUILT — verify before rebuilding
+Recorded because a session brief asserted the opposite. `CompanionService.GATHER_SPECS`
+has contained a `TheAudienceBehavior` entry since the freeze-deadlock fix, targeting
+the Audience's **own** ring (`MIN_DISTANCE` 16 → `RESUME_DISTANCE` 20) rather than the
+escorts' close ring, and `gather` is called from `EntropyMod.reapplyTo` — i.e. from the
+same JOIN / AFTER_RESPAWN / AFTER_PLAYER_CHANGE_LEVEL hooks as `reapplyAll`, using
+`getEntityInAnyDimension` and `teleportTo`.
+
+What was genuinely missing was the **proof that the landing spot does not fight the
+state machine**, which is now asserted exhaustively: every landing distance across the
+whole 16-20 ring, seen and unseen, resolves to `FROZEN` or `IDLE` and never to
+`BACK_OFF` or `APPROACHING`. Two boundary facts carry it — `gather` clears the
+villager's recorded state so `wasApproaching` is false, and `SafeSpawn`'s horizontal
+band plus the 8-block vertical search gives a worst-case 3D landing of
+`hypot(20, 8) = 21.54`, still inside lost-track at 32.
