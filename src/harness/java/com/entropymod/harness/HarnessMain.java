@@ -39,6 +39,14 @@ import com.entropymod.entropy.behavior.EmotionalSupportLlamaBehavior;
 import com.entropymod.entropy.behavior.LoyalPackBehavior;
 import com.entropymod.entropy.behavior.TheAudienceBehavior;
 import com.entropymod.entropy.behavior.TheEntourageBehavior;
+import com.entropymod.entropy.EntropyDamageTypes;
+import com.entropymod.entropy.HookEffectBehavior;
+import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
+import com.entropymod.entropy.behavior.EarthquakeBehavior;
+import com.entropymod.entropy.behavior.VampireRulesBehavior;
+import com.entropymod.entropy.quake.EarthquakeService;
+import com.entropymod.mixin.LivingEntityDamageDealtMixin;
+import com.entropymod.mixin.PlayerButterfingersMixin;
 import com.entropymod.entropy.companion.CompanionBuffs;
 import com.entropymod.entropy.companion.CompanionMotion;
 import com.entropymod.entropy.companion.CompanionRoster;
@@ -140,6 +148,7 @@ public final class HarnessMain {
 		tier2BatchIdempotencyAndPersistence();
 		spawnBatch();
 		companionBatch();
+		tier2CombatBatch();
 		companionMotion();
 		companionGatherTrigger();
 		companionAudienceLook();
@@ -3023,6 +3032,22 @@ public final class HarnessMain {
 				"and leaving it out of BOTH registries keeps the id tables consistent");
 	}
 
+	/** Every copy of a classpath resource, in classloader order. Tag files merge, so there are several. */
+	private static List<String> allResources(String path) {
+		List<String> out = new ArrayList<>();
+		try {
+			var urls = HarnessMain.class.getClassLoader().getResources(path.substring(1));
+			while (urls.hasMoreElements()) {
+				try (var in = urls.nextElement().openStream()) {
+					out.add(new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+				}
+			}
+		} catch (Exception ignored) {
+			// An unreadable classpath is itself a failure the caller's size check reports.
+		}
+		return out;
+	}
+
 	/** Reads a classpath resource as a string, or null. */
 	private static String readResource(String path) {
 		try (var in = HarnessMain.class.getResourceAsStream(path)) {
@@ -4439,6 +4464,339 @@ public final class HarnessMain {
 			check(CompanionMotion.shouldWatchPlayer(s),
 					"...and every other state (" + s + ") watches the player");
 		}
+	}
+
+	/**
+	 * The Tier 2 combat/survival batch: Butterfingers Extreme, Vampire Rules,
+	 * Earthquake.
+	 */
+	private static void tier2CombatBatch() {
+		section("Tier 2 batch: Butterfingers Extreme / Vampire Rules / Earthquake");
+
+		// ---------- wiring, no-repeat, persistence: all three together -------------
+		for (String id : List.of(ButterfingersExtremeBehavior.ID, VampireRulesBehavior.ID,
+				EarthquakeBehavior.ID)) {
+			EffectDefinition def = EffectRegistry.byId(id);
+			check(def != null, id + ": registered in EffectRegistry");
+			check(EffectBehaviors.get(id) != null, id + ": wired in EffectBehaviors");
+			if (def == null) {
+				continue;
+			}
+			check(def.minEntropy() == 25 && def.maxEntropy() == 50,
+					id + ": Tier 2 entropy window 25-50");
+			check(def.counterplay(),
+					id + ": counterplay = true -- required below entropy 40 by CLAUDE.md, and "
+							+ "all three are genuinely answerable (pick the item up, eat "
+							+ "normally, walk it off)");
+
+			// Idempotency. All three are HookEffectBehavior, so apply() is final and
+			// empty -- but assert it rather than trust it, because that is the guarantee
+			// the whole respawn/relog design rests on.
+			check(EffectBehaviors.get(id) instanceof HookEffectBehavior,
+					id + ": is a HookEffectBehavior, so apply() is idempotent by being empty "
+							+ "-- nothing to re-derive on respawn, rejoin or dimension change");
+		}
+
+		// No-repeat and persistence are registry/manager properties, driven here
+		// against the three new ids specifically.
+		AcquiredEffects acquired = new AcquiredEffects();
+		acquired.add(ButterfingersExtremeBehavior.ID);
+		acquired.add(VampireRulesBehavior.ID);
+		acquired.add(EarthquakeBehavior.ID);
+		check(acquired.size() == 3, "all three can be held at once (three categories)");
+		acquired.add(EarthquakeBehavior.ID);
+		check(acquired.size() == 3, "re-adding one is a no-op -- the set is the no-repeat rule");
+
+		Set<String> categories = new java.util.HashSet<>();
+		for (String id : List.of(ButterfingersExtremeBehavior.ID, VampireRulesBehavior.ID,
+				EarthquakeBehavior.ID)) {
+			categories.add(EffectRegistry.byId(id).category().name());
+		}
+		check(categories.size() == 3,
+				"...and they sit in three DIFFERENT categories (" + categories + "), so "
+						+ "anti-stacking never separates them from each other");
+
+		// ---------- BUTTERFINGERS EXTREME ------------------------------------------
+		checkNear(constant(ButterfingersExtremeBehavior.class, "CHANCE"), 0.10, 1e-7,
+				"Butterfingers: 10% per landed attack");
+
+		double chance = constant(ButterfingersExtremeBehavior.class, "CHANCE");
+		double perFight = 1.0 - Math.pow(1.0 - chance, 4);
+		checkNear(perFight, 0.3439, 1e-3,
+				"...which is a " + String.format("%.1f", perFight * 100)
+						+ "% chance of an incident in a 4-hit fight -- about one fight in "
+						+ "three, the number the tuning was chosen against");
+		checkNear(1.0 / chance, 10.0, 1e-6,
+				"...and a mean of 10 attacks between flings");
+		check(chance > constant(ClumsyDiggerBehavior.class, "CHANCE"),
+				"deliberately HIGHER than Clumsy Digger's, and the two are not comparable: "
+						+ "Clumsy Digger is an invisible rate whose chance is one factor in a "
+						+ "product, this is a discrete visible event whose risk is 'is it even "
+						+ "on'");
+
+		// It must not fire on anything but an attack. This is a structural claim about
+		// the mixin's target, not something a value check can reach: assert the class
+		// references Player.attack's own choke point and nothing item-use related.
+		check(Checks.classReferences(PlayerButterfingersMixin.class, "attack"),
+				"Butterfingers is anchored on Player.attack");
+		check(Checks.classReferences(PlayerButterfingersMixin.class, "hurtOrSimulate"),
+				"...specifically on the hurtOrSimulate call inside it -- the LANDED hit, "
+						+ "javap-verified as occurring exactly once in that method, rather "
+						+ "than TAIL (which binds only the last of attack's three RETURNs)");
+		for (String useMethod : List.of("useItem", "useItemOn", "releaseUsingItem", "mineBlock",
+				"hurtAndBreak", "startUsingItem")) {
+			check(!Checks.classReferences(PlayerButterfingersMixin.class, useMethod),
+					"...and NOT on " + useMethod + " -- eating, blocking, mining and drinking "
+							+ "must never fling the held item");
+		}
+		check(Checks.classReferences(PlayerButterfingersMixin.class, "removeFromSelected"),
+				"the slot is emptied before the copy is dropped -- Player.drop only builds "
+						+ "the entity, so the reverse order would duplicate the item");
+		check(Checks.classReferences(PlayerButterfingersMixin.class, "drop"),
+				"...and it is a real dropped ItemEntity via vanilla's own Player.drop, not a "
+						+ "deletion or a silent slot swap");
+
+		// ---------- VAMPIRE RULES ---------------------------------------------------
+		checkNear(constant(VampireRulesBehavior.class, "DAMAGE_PER_FOOD_POINT"), 4.0, 1e-7,
+				"Vampire Rules: 4.0 damage per food point, i.e. 8 damage per SHANK -- a shank "
+						+ "is one drumstick icon, which is two of the bar's 20 points");
+
+		float[] fed = VampireRulesBehavior.feed(8.0f, 10, 0.0f);
+		check(fed[0] == 12.0f && fed[1] == 0.0f,
+				"8 damage at 10/20 food restores exactly 1 shank (2 points): food 10 -> 12");
+
+		fed = VampireRulesBehavior.feed(20.0f, 10, 0.0f);
+		check(fed[0] == 15.0f,
+				"killing a 20 HP zombie outright returns 5 points (2.5 shanks): food 10 -> 15");
+
+		// The overflow, which is the half that needed the FoodData investigation.
+		fed = VampireRulesBehavior.feed(40.0f, 18, 3.0f);
+		check(fed[0] == 20.0f,
+				"OVERFLOW: food is capped at vanilla's 20 (Mth.clamp in FoodData.add)");
+		checkNear(fed[1], 3.0 + 8.0, 1e-5,
+				"...and the 8 points that did not fit spill into SATURATION rather than "
+						+ "vanishing -- 3.0 + 8.0 = 11.0");
+		check(fed[1] > 0.0f && fed[1] > 3.0f,
+				"...so saturation genuinely rose, which FoodData.eat could never do here: "
+						+ "its private add() clamps saturation to the food level");
+
+		// Above the normal cap. FoodData.add clamps saturation to foodLevel (<= 20);
+		// setSaturation does not clamp at all, and nothing re-clamps afterwards.
+		fed = VampireRulesBehavior.feed(120.0f, 20, 19.0f);
+		check(fed[1] > 20.0f,
+				"saturation is allowed ABOVE the normal cap of 20 (got "
+						+ String.format("%.1f", fed[1]) + ") -- vanilla's ceiling lives only "
+						+ "in the private add(), and the public setters do not clamp");
+		checkNear(constant(VampireRulesBehavior.class, "MAX_SATURATION"), 40.0, 1e-7,
+				"...bounded at 40.0, twice vanilla's cap. That bound is OURS, not vanilla's: "
+						+ "the overflow is unbounded in the game, and an unbounded bank would "
+						+ "delete food as a resource for the rest of the run");
+		fed = VampireRulesBehavior.feed(10000.0f, 20, 39.0f);
+		checkNear(fed[1], 40.0, 1e-5, "...and the bound actually holds");
+
+		// Rounding: the reason the fraction goes to saturation rather than being
+		// truncated per hit. Same trap EffectHooks.scaleAmount exists for on the XP side.
+		fed = VampireRulesBehavior.feed(3.0f, 10, 0.0f);
+		check(fed[0] == 10.0f && fed[1] > 0.0f,
+				"a 3-damage hit is worth 0.75 of a point: food is unchanged and the 0.75 goes "
+						+ "to saturation rather than being truncated to nothing");
+		float total = 0.0f;
+		int food = 0;
+		float sat = 0.0f;
+		for (int i = 0; i < 40; i++) {
+			float[] step = VampireRulesBehavior.feed(3.0f, food, sat);
+			food = (int) step[0];
+			sat = step[1];
+			total += 3.0f;
+		}
+		checkNear(food + sat, total / 4.0f, 1e-3,
+				"40 weak hits conserve nutrition EXACTLY (" + String.format("%.2f", food + sat)
+						+ " of " + String.format("%.2f", total / 4.0f) + " points) -- nothing "
+						+ "is lost to per-hit rounding");
+
+		check(VampireRulesBehavior.feed(0.0f, 10, 2.0f)[0] == 10.0f,
+				"zero damage feeds nothing");
+		check(VampireRulesBehavior.feed(-5.0f, 10, 2.0f)[0] == 10.0f,
+				"...and negative damage cannot drain the player");
+
+		// The hook direction, which is the whole finding for this effect.
+		check(Checks.classReferences(LivingEntityDamageDealtMixin.class, "recordDamage"),
+				"Vampire Rules reads CombatTracker.recordDamage's argument -- the only place "
+						+ "the POST-mitigation damage exists as a value");
+		check(!Checks.classReferences(LivingEntityDamageDealtMixin.class, "hurtOrSimulate"),
+				"...and NOT Player.attack's hurtOrSimulate argument, which is damage SENT and "
+						+ "would pay the same for an unarmoured and a netherite target");
+		check(Checks.classReferences(EffectHooks.class, "setSaturation"),
+				"the hook writes setSaturation directly rather than calling FoodData.eat, "
+						+ "whose private add() would discard the entire overflow");
+		check(!Checks.classReferences(EffectHooks.class, "eat"),
+				"...and eat() is not called anywhere in EffectHooks");
+
+		// ---------- EARTHQUAKE -------------------------------------------------------
+		check((int) constant(EarthquakeBehavior.class, "MIN_INTERVAL_TICKS") == 900,
+				"Earthquake: minimum interval 900 ticks = 45 seconds");
+		check((int) constant(EarthquakeBehavior.class, "MAX_INTERVAL_TICKS") == 3600,
+				"...maximum 3600 ticks = 3 minutes");
+		check((int) constant(EarthquakeBehavior.class, "TREMOR_TICKS") == 80,
+				"...tremor duration 80 ticks = 4 seconds");
+		checkNear(constant(EarthquakeBehavior.class, "TREMOR_DAMAGE"), 1.0, 1e-7,
+				"...and each hit is 1.0 damage, half a heart");
+		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 1,
+				"...Slowness amplifier 1 = displayed level II");
+
+		// The damage timing, and the vanilla constraint that sets its floor.
+		int damageTicks = 0;
+		int first = -1;
+		int last = -1;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (EarthquakeBehavior.isDamageTick(t)) {
+				damageTicks++;
+				if (first < 0) {
+					first = t;
+				}
+				last = t;
+			}
+		}
+		check(damageTicks == 2, "exactly TWO hits land inside one tremor (got " + damageTicks + ")");
+		check(first == 0 && last == EarthquakeBehavior.TREMOR_TICKS,
+				"...at the FIRST tick and the LAST, bracketing the window rather than being "
+						+ "spaced inside it -- the two moments the player has to react to are "
+						+ "the start and the end");
+		int separation = last - first;
+		check(separation > 10,
+				"THE HARD CONSTRAINT: the hits are " + separation + " ticks apart, and "
+						+ "LivingEntity.hurtServer DISCARDS a second hit of equal or smaller "
+						+ "size while invulnerableTime is still above 10. Two 1.0-damage hits "
+						+ "closer than 10 ticks would silently be one hit");
+		check(separation >= 8 * 10,
+				"...with an 8x margin on that window, so the promise of two hits does not "
+						+ "rest on the margin");
+		check(EarthquakeBehavior.isFinished(EarthquakeBehavior.TREMOR_TICKS),
+				"the tremor ends on the tick of its second hit, so the window closes with it");
+		check(!EarthquakeBehavior.isFinished(EarthquakeBehavior.TREMOR_TICKS - 1),
+				"...and not before");
+
+		// The random interval genuinely re-rolls -- same discipline as Creeper Magnet.
+		SpawnSchedule<String> quake = new SpawnSchedule<>(
+				EarthquakeBehavior.MIN_INTERVAL_TICKS, EarthquakeBehavior.MAX_INTERVAL_TICKS,
+				new java.util.Random(20260813L));
+		check(quake.isRandomised(), "Earthquake's schedule is randomised, not a fixed cadence");
+		List<Integer> gaps = new ArrayList<>();
+		int sinceLast = 0;
+		int fires = 0;
+		for (int tick = 0; tick < 8_000_000 && fires < 2000; tick++) {
+			sinceLast++;
+			if (quake.tick("p")) {
+				gaps.add(sinceLast);
+				sinceLast = 0;
+				fires++;
+			}
+		}
+		check(fires == 2000,
+				"2000 consecutive tremors fire (" + fires + ") -- roughly 21 hours of play at "
+						+ "the mean interval, so a schedule that degraded after N would show");
+		int minGap = gaps.stream().mapToInt(Integer::intValue).min().orElse(0);
+		int maxGap = gaps.stream().mapToInt(Integer::intValue).max().orElse(0);
+		check(minGap >= EarthquakeBehavior.MIN_INTERVAL_TICKS
+						&& maxGap <= EarthquakeBehavior.MAX_INTERVAL_TICKS,
+				"every gap is inside [900, 3600] (observed " + minGap + ".." + maxGap + ")");
+		check(maxGap > EarthquakeBehavior.MAX_INTERVAL_TICKS - 60,
+				"...and the top of the range is actually reachable, so nextInt's off-by-one "
+						+ "has not crept back in");
+
+		long distinct = gaps.stream().distinct().count();
+		// Coupon-collector expectation for 2000 draws over 2701 values, the same
+		// derivation Creeper Magnet's check uses rather than a rounded guess.
+		int span = EarthquakeBehavior.MAX_INTERVAL_TICKS - EarthquakeBehavior.MIN_INTERVAL_TICKS + 1;
+		double expectedDistinct = span * (1.0 - Math.pow(1.0 - 1.0 / span, 2000));
+		check(distinct > expectedDistinct * 0.85 && distinct < expectedDistinct * 1.15,
+				"the interval genuinely RE-ROLLS: " + distinct + " distinct gaps against a "
+						+ "coupon-collector expectation of " + Math.round(expectedDistinct)
+						+ " (+/-15%). A schedule that drew once and repeated would show 1");
+
+		double firstHalf = gaps.subList(0, 1000).stream().mapToInt(Integer::intValue).average().orElse(0);
+		double secondHalf = gaps.subList(1000, 2000).stream().mapToInt(Integer::intValue).average().orElse(0);
+		check(Math.abs(firstHalf - secondHalf) < (EarthquakeBehavior.MAX_INTERVAL_TICKS
+						- EarthquakeBehavior.MIN_INTERVAL_TICKS) * 0.1,
+				"...and the last 1000 gaps have the same mean as the first 1000 ("
+						+ Math.round(firstHalf) + " vs " + Math.round(secondHalf) + ")");
+
+		// NO SafeSpawn. The schedule and the position search arrived together for the
+		// two spawn effects and it would be easy to assume they are one component.
+		check(!Checks.classReferences(EarthquakeService.class, "SafeSpawn"),
+				"Earthquake pulls in NO SafeSpawn machinery -- it spawns nothing, so the "
+						+ "heightmap search that every previous SpawnSchedule user needed is "
+						+ "simply absent");
+		check(!Checks.classReferences(EarthquakeService.class, "findNear"),
+				"...nor any position search of its own");
+		check(Checks.classReferences(EarthquakeService.class, "SpawnSchedule"),
+				"...while still reusing SpawnSchedule for the cadence rather than writing a "
+						+ "fourth timer");
+
+		// True damage: the tag memberships ARE the mechanism, so read the shipped JSON.
+		check(Checks.classReferences(EntropyDamageTypes.class, "tremor"),
+				"Earthquake's damage source is entropymod:tremor");
+		check(!Checks.classReferences(EarthquakeService.class, "magic")
+						&& !Checks.classReferences(EarthquakeService.class, "SONIC_BOOM"),
+				"...and not a borrowed vanilla type, so the death message is its own");
+
+		// TRUE DAMAGE: the tag memberships ARE the mechanism, so read the shipped JSON
+		// rather than restating the constant -- the same technique Clumsy Digger's
+		// #enchantable/mining check uses. javap already established the two gates:
+		//   getDamageAfterArmorAbsorb: if (!src.is(BYPASSES_ARMOR)) apply armour+toughness
+		//   getDamageAfterMagicAbsorb: if (src.is(BYPASSES_ENCHANTMENTS)) return f  (before Protection)
+		for (String tag : List.of("bypasses_armor", "bypasses_enchantments")) {
+			List<String> copies = allResources("/data/minecraft/tags/damage_type/" + tag + ".json");
+			check(copies.size() >= 2,
+					tag + ": BOTH vanilla's file and the mod's are on the classpath ("
+							+ copies.size() + " copies) -- which is what additive tag merging "
+							+ "means, and is why one entry is added rather than nineteen "
+							+ "overwritten");
+			boolean ours = copies.stream().anyMatch(j -> j.contains("entropymod:tremor"));
+			check(ours, "..." + tag + " contains entropymod:tremor");
+			boolean replaces = copies.stream().anyMatch(j -> j.replace(" ", "").contains("\"replace\":true"));
+			check(!replaces,
+					"...and NO copy sets \"replace\": true -- a replacing file would delete "
+							+ "vanilla's own entries and silently un-bypass every other type");
+		}
+		// The negative half: void damage was the intuitive choice and would have been
+		// halved by Protection, because bypasses_enchantments has exactly one vanilla entry.
+		String enchTag = readResource("/data/minecraft/tags/damage_type/bypasses_enchantments.json");
+		check(enchTag != null, "the bypasses_enchantments tag is readable");
+		// NOTE: these read EVERY copy, not getResourceAsStream. Once the mod ships a
+		// file at a vanilla path, the single-resource lookup returns whichever copy the
+		// classloader reaches first -- which is the mod's, containing one entry. That is
+		// how the first draft of this check "proved" out_of_world was not in
+		// bypasses_armor.
+		boolean voidBypassesEnchantments = allResources(
+				"/data/minecraft/tags/damage_type/bypasses_enchantments.json").stream()
+				.anyMatch(j -> j.contains("out_of_world"));
+		check(!voidBypassesEnchantments,
+				"REFUTED ALTERNATIVE: minecraft:out_of_world (void) is NOT in "
+						+ "bypasses_enchantments -- it ignores armour, resistance and even "
+						+ "invulnerability, and is still reduced by Protection. Reaching for "
+						+ "it would have shipped an effect a diamond set quietly halves");
+		boolean voidBypassesArmor = allResources(
+				"/data/minecraft/tags/damage_type/bypasses_armor.json").stream()
+				.anyMatch(j -> j.contains("out_of_world"));
+		check(voidBypassesArmor,
+				"...which is easy to miss precisely because it IS in bypasses_armor");
+		boolean sonicBoomIsTheOnlyOne = allResources(
+				"/data/minecraft/tags/damage_type/bypasses_enchantments.json").stream()
+				.anyMatch(j -> j.contains("sonic_boom"));
+		check(sonicBoomIsTheOnlyOne,
+				"...and sonic_boom is vanilla's ONLY entry there, i.e. the single vanilla "
+						+ "precedent for damage that armour and Protection both ignore");
+
+		String tremorType = readResource("/data/entropymod/damage_type/tremor.json");
+		check(tremorType != null, "entropymod:tremor's own damage_type JSON ships");
+		check(tremorType != null && tremorType.contains("\"scaling\": \"never\""),
+				"...with scaling 'never', so a fixed half-heart stays half a heart on Hard");
+		check(tremorType != null && tremorType.contains("\"message_id\": \"tremor\""),
+				"...and its own message_id rather than sonic_boom's 'obliterated by a "
+						+ "sonically-charged shriek'");
+		check(tagContains("/assets/entropymod/lang/en_us.json", "death.attack.tremor"),
+				"...with the matching death message defined");
 	}
 
 	/** The roster's own rules -- keying, counting, forgetting. */

@@ -89,6 +89,9 @@ public final class EffectBehaviors {
 		register(TheEntourageBehavior.ID, new TheEntourageBehavior());
 		register(TheAudienceBehavior.ID, new TheAudienceBehavior());
 		register(EmotionalSupportLlamaBehavior.ID, new EmotionalSupportLlamaBehavior());
+		register(ButterfingersExtremeBehavior.ID, new ButterfingersExtremeBehavior());
+		register(VampireRulesBehavior.ID, new VampireRulesBehavior());
+		register(EarthquakeBehavior.ID, new EarthquakeBehavior());
 
 		// TODO: Tiers 2-4 + odd/signature effects, same one-line-per-effect pattern.
 	}

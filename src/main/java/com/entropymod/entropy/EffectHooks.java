@@ -3,6 +3,7 @@ package com.entropymod.entropy;
 import com.entropymod.EntropyMod;
 import com.entropymod.entropy.behavior.BadReputationBehavior;
 import com.entropymod.entropy.behavior.BehemothGauntletsBehavior;
+import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
 import com.entropymod.entropy.behavior.BeastWhispererBehavior;
 import com.entropymod.entropy.behavior.ClumsyDiggerBehavior;
 import com.entropymod.entropy.behavior.CrouchInvincibilityBehavior;
@@ -22,6 +23,7 @@ import com.entropymod.entropy.behavior.IronWillBehavior;
 import com.entropymod.entropy.behavior.PhoenixChamberedHeartBehavior;
 import com.entropymod.entropy.behavior.SlipperyGripBehavior;
 import com.entropymod.entropy.behavior.SlowLearnerBehavior;
+import com.entropymod.entropy.behavior.VampireRulesBehavior;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -31,6 +33,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.tags.DamageTypeTags;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 
@@ -351,6 +354,68 @@ public final class EffectHooks {
 	public static boolean hasBadReputation(Player player) {
 		AcquiredEffects acquired = acquired(player);
 		return acquired != null && acquired.contains(BadReputationBehavior.ID);
+	}
+
+	/**
+	 * Butterfingers Extreme: true if this attack should fling the held item.
+	 *
+	 * <p>Rolls the chance itself so the mixin stays a single expression, and rolls it
+	 * <b>only when there is something to fling</b> -- an empty main hand returns false
+	 * without consuming a roll, which is what makes bare-handed combat a complete
+	 * counterplay rather than an unlucky one.
+	 *
+	 * <p>Logged at DEBUG for the reason Clumsy Digger is: the outcome is visible, but
+	 * "how often" is not, and a rate reported from memory after a play session is not
+	 * evidence. Grep {@code Butterfingers} in {@code run/logs/debug-N.log.gz} and count
+	 * against {@link ButterfingersExtremeBehavior#CHANCE}.
+	 */
+	public static boolean rollButterfingers(Player player, RandomSource random) {
+		AcquiredEffects acquired = acquired(player);
+		if (acquired == null || !acquired.contains(ButterfingersExtremeBehavior.ID)) {
+			return false;
+		}
+		if (player.getMainHandItem().isEmpty()) {
+			return false;
+		}
+		if (random.nextFloat() >= ButterfingersExtremeBehavior.CHANCE) {
+			return false;
+		}
+		EntropyMod.LOGGER.debug("Butterfingers Extreme: flinging {} from {}",
+				player.getMainHandItem().getItemName().getString(),
+				player.getName().getString());
+		return true;
+	}
+
+	/**
+	 * Vampire Rules: converts damage this player just dealt into food.
+	 *
+	 * <p>Called from the {@code CombatTracker.recordDamage} hook inside
+	 * {@code LivingEntity.actuallyHurt}, so {@code damage} is the post-armour,
+	 * post-enchantment, post-resistance, post-absorption amount the victim is about to
+	 * lose -- see {@link VampireRulesBehavior} for why none of the earlier, more
+	 * obvious hooks carry that number.
+	 *
+	 * <p>The {@code attacker != victim} guard is load-bearing rather than defensive:
+	 * without it, fall damage and any other self-attributed source would feed the
+	 * player for hurting themselves.
+	 *
+	 * <p>Writes {@code setFoodLevel}/{@code setSaturation} directly rather than calling
+	 * {@code FoodData.eat}, because {@code eat} routes through the private {@code add},
+	 * which clamps saturation to the current food level and would discard the entire
+	 * overflow this effect exists to produce.
+	 */
+	public static void vampireDrain(Entity attacker, Entity victim, float damage) {
+		if (!(attacker instanceof Player player) || attacker == victim || damage <= 0.0f) {
+			return;
+		}
+		AcquiredEffects acquired = acquired(player);
+		if (acquired == null || !acquired.contains(VampireRulesBehavior.ID)) {
+			return;
+		}
+		FoodData food = player.getFoodData();
+		float[] fed = VampireRulesBehavior.feed(damage, food.getFoodLevel(), food.getSaturationLevel());
+		food.setFoodLevel((int) fed[0]);
+		food.setSaturation(fed[1]);
 	}
 
 	/**

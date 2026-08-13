@@ -13,182 +13,6 @@ cap (default 100).
 
 ---
 
-## Part 0: Mapping migration note (read this first if anything won't compile)
-
-This project's Loom setup uses **Mojang's official mappings**, not Yarn.
-This matters because almost every Minecraft-tutorial or Stack Overflow
-snippet you'll find online is written in Yarn names. As of Minecraft
-1.21.11, Yarn mappings stopped being published entirely -- this project
-targets 26.1.2, which is newer, so Yarn names don't even exist for it.
-
-Confirmed correct names (verified against docs.fabricmc.net for MC 26.1.2,
-not guessed) vs. the Yarn names you'll see in older guides:
-
-| Yarn (don't use)      | Mojang (use this)              |
-|------------------------|--------------------------------|
-| `CustomPayload`        | `CustomPacketPayload`          |
-| `CustomPayload.Id<T>`  | `CustomPacketPayload.Type<T>`  |
-| `getId()` override     | `type()` override              |
-| `PacketCodec`          | `StreamCodec`                  |
-| `RegistryByteBuf`      | `RegistryFriendlyByteBuf`      |
-| `PacketCodec.tuple`    | `StreamCodec.composite`        |
-| `PayloadTypeRegistry.playS2C()` | `PayloadTypeRegistry.clientboundPlay()` |
-| `PayloadTypeRegistry.playC2S()` | `PayloadTypeRegistry.serverboundPlay()` |
-| `Text` / `Text.literal`| `Component` / `Component.literal` |
-| `PlayerManager`        | `PlayerList`                   |
-| `npc.Villager`         | `npc.villager.Villager` *(moved package)* |
-| `getPlayerManager()`   | `getPlayerList()`              |
-| `World`                | `Level`                        |
-| `PlayerEntity`         | `Player`                       |
-| `ServerPlayerEntity`   | `ServerPlayer`                 |
-| `ActionResult`         | `InteractionResult`            |
-| `StatusEffectInstance` | `MobEffectInstance`            |
-| `ButtonWidget`         | `Button`                       |
-| `.dimensions(x,y,w,h)` (button) | `.bounds(x,y,w,h)`     |
-| `addDrawableChild`     | `addRenderableWidget`          |
-| `DrawContext`          | *(see render pipeline note below)* |
-| `TextRenderer` / `this.textRenderer` | `this.font`      |
-| `ClientCommandManager` (client cmds) | `ClientCommands`         |
-| `CommandManager` (server cmds)       | `Commands`               |
-
-**One correction to the Fabric docs' own wording:** the networking doc page
-says the server is accessible "via `ServerPlayerEntity.server`" as if it's a
-public field. In this version's mappings it's **private**. The verified
-working accessor (confirmed against two separate examples in the same docs
-page) is: `((ServerLevel) player.level()).getServer()` -- `player.level()`
-appears directly in the docs' server-receiver example, and the
-`(ServerLevel)` cast appears in the docs' Lightning Tater example; combining
-them is what actually compiles. A `serverLevel()` method (guessed before
-this) does not exist on `ServerPlayer` in this mapping -- don't reuse that.
-
-
-`Identifier` is correct as-is in both -- Mojang appears to have renamed
-their own `ResourceLocation` to `Identifier` at some point, so this one
-name is shared between old-Yarn-style code and current Mojang mappings.
-
-**Bigger change: the screen render pipeline itself is different in this MC
-version**, not just renamed. Screens no longer override
-`render(DrawContext, mouseX, mouseY, delta)`. Instead they override
-`extractRenderState(GuiGraphicsExtractor graphics, mouseX, mouseY, delta)`
-(must call `super.extractRenderState(...)` first).
-
-**This is now VERIFIED, not guessed** (commit `422687d`). Every GUI symbol
-was checked with `javap` against the deobfuscated jar rather than inferred
-from docs. If you need to check something else, this is the command:
-
-```bash
-javap -p -cp ~/.gradle/caches/fabric-loom/minecraftMaven/net/minecraft/\
-minecraft-clientonly-deobf/26.1.2/minecraft-clientonly-deobf-26.1.2.jar \
-  net.minecraft.client.gui.GuiGraphicsExtractor
-```
-
-Use `javap -p -c` for bytecode when argument *order* is what's in doubt.
-Prefer this over the docs site -- it is the actual shipped API.
-
-Facts that checking produced, three of which contradicted reasonable guesses:
-
-- `GuiGraphicsExtractor` **is** in `net.minecraft.client.gui`. The old note
-  called this the least-verified import in the project; it was right.
-- **`mouseClicked` changed signature**: it is now
-  `mouseClicked(MouseButtonEvent, boolean)`, *not*
-  `(double mouseX, double mouseY, int button)`. Get coordinates from
-  `event.x()` / `event.y()`. Any tutorial older than this version is wrong
-  here, and the mismatch fails as "method does not override" rather than
-  anything that points at the real cause.
-- **`fill(x1, y1, x2, y2, argb)` is corner-to-corner, not `(x, y, w, h)`.**
-  Its bytecode swaps each pair when out of order, so either winding works,
-  but passing a width where a right edge belongs silently draws garbage.
-- **`fill` colours need an explicit alpha byte.** `0x707070` has alpha 0 and
-  draws *nothing*. Use `0xFF707070`. Note this differs from text colours,
-  which `Font` promotes to opaque when the alpha bits are empty -- so
-  `0xFFFFFF` works for text but is invisible as a fill. This asymmetry is a
-  very easy way to lose an hour.
-- Useful `GuiGraphicsExtractor` methods beyond `text`: `fill`, `fillGradient`,
-  `outline`, `centeredText`, `textWithWordWrap`, `enableScissor` /
-  `disableScissor`, `pose()` (a JOML `Matrix3x2fStack` with
-  `pushMatrix`/`popMatrix`/`scale`/`translate` -- this is how you get
-  smaller text, since Minecraft has exactly one font size).
-- Custom widgets extend `AbstractWidget(x, y, w, h, Component)` and implement
-  `extractWidgetRenderState(...)` + `updateWidgetNarration(...)`.
-  `AbstractWidget.mouseClicked` hit-tests the full widget rect, plays the
-  click sound, then calls `onClick` -- so a panel-sized widget gets
-  whole-panel clicking for free. Prefer this over `Button` when the visual
-  is custom, and over manual hit-testing in `Screen`.
-- **`HudRenderCallback` does not exist in this Fabric API version.** Nearly
-  every HUD tutorial online uses it. The current API is
-  `HudElementRegistry.addLast(Identifier, HudElement)` (also `addFirst` /
-  `attachElementBefore` / `attachElementAfter`, anchored on the ids in
-  `VanillaHudElements`), and `HudElement` is a single method:
-  `extractRenderState(GuiGraphicsExtractor, DeltaTracker)` -- the same
-  graphics type the screen pipeline uses.
-- **The HUD keeps rendering while a `Screen` is open.** Confirmed in
-  `GameRenderer`'s bytecode: the `Gui.extractRenderState` call is gated only
-  on a boolean parameter, while the `Screen` call is separately gated on
-  `minecraft.screen != null`. Any HUD element that shouldn't show behind an
-  open GUI must check `Minecraft.getInstance().screen == null` itself.
-- `StreamCodec.composite` supports up to 12 component pairs here, so the
-  old "arity limit" worry in the networking notes no longer applies.
-- **`source.hasPermission(2)` does not exist.** This is the idiom in every
-  server-command tutorial and it is gone in this version. `CommandSourceStack`
-  has no `hasPermission` method at all; permissions now go through
-  `PermissionSet` / `PermissionCheck`. The verified working form, taken from
-  vanilla `GameRuleCommand`'s own bytecode, is:
-
-  ```java
-  Commands.literal("mycommand")
-      .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
-  ```
-
-  The levels are `Commands.LEVEL_ALL` / `LEVEL_MODERATORS` / `LEVEL_GAMEMASTERS`
-  (the old level 2) / `LEVEL_ADMINS` / `LEVEL_OWNERS`. `Commands.hasPermission`
-  is a static helper returning a `PermissionProviderCheck`, which implements
-  `Predicate`, which is what `.requires` wants. Note the two `hasPermission`s
-  are different things — the static one on `Commands` exists, the instance one
-  on the source does not.
-- **There is no `Entity.getServer()`** in this mapping — the convenience
-  accessor most code reaches for simply isn't there. But `ServerPlayer.level()`
-  is a **covariant override returning `ServerLevel`**, so from a `ServerPlayer`
-  the accessor is just `player.level().getServer()`, no cast needed. (The
-  `(ServerLevel)` cast recorded above is still required when you only have a
-  `Player`.)
-- **`ServerEntityWorldChangeEvents` → `ServerEntityLevelChangeEvents`**, same
-  World→Level rename as everything else, and the field is
-  `AFTER_PLAYER_CHANGE_LEVEL` (not `AFTER_PLAYER_CHANGE`). Its functional method
-  is `afterChangeLevel(ServerPlayer, ServerLevel origin, ServerLevel destination)`.
-- **`DimensionDataStorage` → `SavedDataStorage`**, reached via
-  `ServerLevel.getDataStorage()`. `SavedData` no longer has `save(CompoundTag)`
-  / a load function; it is **codec-based** now:
-  `new SavedDataType<>(Identifier, Supplier<T>, Codec<T>, DataFixTypes)` plus
-  `storage.computeIfAbsent(TYPE)`. Any tutorial showing `SavedData.load`/`save`
-  overrides predates this.
-- **`AttributeModifier` is keyed by `Identifier`, not `UUID`.** Every older guide
-  builds a `UUID.fromString("...")` constant table; that constructor is gone. The
-  record is `AttributeModifier(Identifier, double, Operation)`, and
-  `AttributeInstance` looks modifiers up by `Identifier` throughout
-  (`getModifier`, `hasModifier`, `removeModifier`). Deriving the id from
-  something stable you already have beats a hardcoded UUID table.
-- **`addTransientModifier` throws `IllegalArgumentException` on a duplicate id**
-  — verified by running it. Use **`addOrUpdateTransientModifier`** (or
-  `addOrReplacePermanentModifier`) for anything that might be applied more than
-  once; its bytecode removes the existing id first, which is what makes
-  re-application idempotent. The failure mode here is a crash on respawn rather
-  than a silent double-buff, which is at least loud — but it is still a crash.
-- Server commands register via
-  `CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> ...)`
-  — **three** parameters, from `net.fabricmc.fabric.api.command.v2`. The
-  client-side callback in `...client.command.v2` takes only two, so copying one
-  shape into the other fails as a lambda-arity error that doesn't name the
-  cause. `CommandSourceStack` is the server source type;
-  `FabricClientCommandSource` is the client one.
-
-If you hit a "cannot find symbol" error not covered by this table: check
-`docs.fabricmc.net/develop/...` for the specific system (networking, GUI,
-text, etc.) -- the docs site versions itself per MC release and the current
-page reflects 26.1.2 specifically, which is what this project needs.
-
----
-
-
 ## Part 1: Core architecture — the rules that hold everywhere
 
 *(Per-component status and known gaps moved to the `entropy-design` skill.
@@ -225,7 +49,7 @@ missing something; fix the abstraction rather than the caller.
 now and the easiest to break. `apply` runs once on the pick and then *again on
 every respawn, rejoin and dimension change* — an unbounded number of times.
 `AttributeEffectBehavior` gets this right via `addOrUpdateTransientModifier`;
-see the Part 0 note on why `addTransientModifier` is the trap.
+see the `entropy-mappings` skill for why `addTransientModifier` is the trap.
 
 ### Permanent effects — the architecture shift, and why
 **Every effect is permanent. `EffectDefinition` has no duration field at all.**
@@ -482,6 +306,14 @@ far from their pack gets a fresh set every relog. **Spawn only on
 `EffectContext.isFreshPick()`**, which makes "no duplicates" structural rather than
 dependent on a lookup succeeding. See `entropy-effects`.
 
+**1t-1y. Three findings from the Tier 2 combat batch, all in `entropy-effects`.** The
+damage-DEALT hook is not the damage-taken hook reversed — only
+`CombatTracker.recordDamage`'s argument, inside `actuallyHurt`, is the post-mitigation
+number. Vanilla's only true-damage precedent is **sonic boom, not the void**:
+`#bypasses_enchantments` has exactly one entry, so void damage is still reduced by
+Protection. And `LivingEntity.INVULNERABLE_DURATION` puts a **10-tick floor** under any
+effect that promises two hits — closer than that and the second is discarded silently.
+
 **1i. `moveTo(Entity, speed)` has NO stop distance -- it paths to the target's own
 block.** It is `createPath(entity, 1)`, so a "follow when further than 6" loop still
 delivers the follower to within a block of you; the threshold gates only *when a
@@ -609,26 +441,9 @@ reconstructing what the real entry point does.
 **`./gradlew harness` — the harness is in the repo now** (`src/harness/java`,
 its own source set, not wired into `build`). Every previous session rebuilt an
 equivalent by hand in a scratch directory and threw it away, which is why the
-same numbers kept being re-derived. 1109 checks currently: the tuning constants as
-actually compiled, the vanilla crop-growth model, Green Thumb's active schedule
-and its per-crop intervals, Green Thumb's immunity to Blight Touched's rewrite,
-Blight Touched's path sweep and its off-by-default gate, Tier 2's movement-scramble
-model and its assign-once persistence, the crop-schedule
-tracking rules, `/entropygrant`'s contract, Clumsy Digger's whole per-tier
-durability table and its tools-only scope gate, Bad Reputation's whole price
-table, `OpenChoicePayload`'s codec round-trip, the run-start gate and its
-save migration, the keybind snapshot's write-once rule, and an assertion that the
-`ENDED` half of the run lifecycle is genuinely absent rather than half-present,
-and the whole Tier 2 content batch -- its registration and wiring, Extreme
-Gravity's physics and stacking safety, Giant Size's SCALE range, Behemoth
-Gauntlets' two branches driven individually, Flamboyant's fire-only gate against
-the shipped tag, Crouch Invincibility's sneak test, Slashed Pockets' slot range,
-Phoenix Chambered Heart's granted amounts and its composition with the permanent
-max-health effects, Slippery Grip's walk/sprint speeds at two different
-baselines, attribute idempotency against a real `AttributeInstance`, and the spawn
-batch -- both cadences (Unstable's fixed 30s, Creeper Magnet's genuinely re-rolled
-30s-2min), Unstable's blast table against vanilla's own damage formula, and the
-creeper's real speed and follow range read from `DefaultAttributes`.
+same numbers kept being re-derived. For what it currently covers, read
+`HarnessMain` — the check list lives there and goes stale the moment it is
+restated anywhere else.
 
 **The start gate is tested by ticking with a `null` server, and that is the
 assertion rather than a shortcut.** `triggerPick` dereferences the server almost
@@ -679,8 +494,8 @@ For anything that *does* need Minecraft classes (codecs, attributes), a harness
 can still run headlessly against the full runtime classpath — call
 `SharedConstants.tryDetectVersion()` then `Bootstrap.bootStrap()` first or any
 registry access throws "Not bootstrapped". That is how the attribute clamps in
-this file were established, and how the idempotency claim below was proven
-against the real `AttributeInstance` rather than a mock.
+the `entropy-effects` skill were established, and how the idempotency claim was
+proven against the real `AttributeInstance` rather than a mock.
 
 Three things are worth re-checking with a harness whenever they're touched:
 
@@ -694,19 +509,16 @@ Three things are worth re-checking with a harness whenever they're touched:
 
 What none of this can prove, and what still needs a real game session: that the
 effects are *felt* (speed, hearts, mining rate), that the mixins actually inject
-against the live game, and that a real death/relog restores everything exactly
-once.
-
-Payload changes still need the round-trip check described under "Entropy cap on
-the wire" above; `HistoryResponsePayload` has been verified that way
-field-by-field (a whole-record `equals` would still pass if two same-typed
-fields were swapped in a way that cancelled out).
-
-What this *cannot* prove, and what still needs a real game session: that the
-chat messages actually appear, that expiry lands on the right wall-clock
+against the live game, that a real death/relog restores everything exactly once,
+that the chat messages actually appear, that expiry lands on the right wall-clock
 moment in a live server tick loop, and that the history request survives a real
 client↔server round trip. `/entropyforcepick` is what makes that session
 practical — without it you'd be waiting out a 3-minute interval per pick.
+
+Payload changes still need the field-by-field round-trip check described above;
+`HistoryResponsePayload` has been verified that way (a whole-record `equals`
+would still pass if two same-typed fields were swapped in a way that cancelled
+out).
 
 One structural claim *is* checkable without the game, and worth re-checking if
 `forcePick` is ever edited: that it delegates rather than duplicates. Its
@@ -773,12 +585,15 @@ deleted** — it now loads on demand instead of in every session.
 |---|---|---|
 | `entropy-effects` | Implementing, tuning, renaming or debugging a specific effect; **writing any new mixin**; **spawning any entity** | Attribute clamps and floors, the javap-verified mixin target table, the `@Shadow` crash trap, Frost Walker's data-driven finding, `SafeSpawn`/`SpawnSchedule` (the shared groundwork every spawn-based effect must reuse), and the full derivation behind every shipped effect's constants |
 | `entropy-design` | Planning what to build next, deciding scope, resolving an open question | Per-component status and gaps, the run lifecycle, the three paths to `ENDED`, and all open design questions |
+| `entropy-mappings` | **Writing any Minecraft API code**; anything that won't compile; a method that "does not override" what it should | The Yarn→Mojang name table, the changed screen/HUD render pipeline, verified GUI/command/attribute signatures, and the `javap` recipe for checking a symbol against the shipped jar |
 
 **Two things to read before you start, because they will not be loaded for you:**
 
-- **Anything that won't compile → Part 0 above**, not a tutorial online. Almost
-  every Minecraft snippet you'll find is written in Yarn names; this project uses
-  Mojang mappings and targets a version Yarn never covered.
+- **Load `entropy-mappings` before you write Minecraft API code**, and reach for
+  it rather than a tutorial the moment something won't compile. Almost every
+  Minecraft snippet you'll find is written in Yarn names; this project uses
+  Mojang mappings and targets a version Yarn never covered, so the tutorial is
+  wrong before you start.
 - **Before writing a mixin → load `entropy-effects` first.** Three traps live
   there that build green and fail at runtime: `@Shadow` does not resolve
   inherited fields (hard crash on every world launch), a subclass may override

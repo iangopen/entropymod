@@ -208,6 +208,18 @@ public final class EffectRegistry {
 				"An invincible llama follows you, carrying 15 slots of storage",
 				EffectCategory.COMPANION, EffectPhase.GOOD, 25, 50, true);
 
+		// Tier 2 combat/survival batch. Butterfingers Extreme and Earthquake are BAD,
+		// Vampire Rules GOOD, so the phase balance is unchanged.
+		register("butterfingers_extreme", "Butterfingers Extreme",
+				"Attacking can fling whatever you are holding out of your hand",
+				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
+		register("vampire_rules", "Vampire Rules",
+				"Damage you deal feeds you -- 8 damage restores a hunger shank, overflowing into saturation",
+				EffectCategory.SURVIVAL, EffectPhase.GOOD, 25, 50, true);
+		register("earthquake", "Earthquake",
+				"Every 45s-3min the ground shakes: Slowness II and two half-hearts of unblockable damage",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 25, 50, true);
+
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.
 	}

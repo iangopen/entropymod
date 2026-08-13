@@ -3996,3 +3996,223 @@ written before anyone asked whether the property was right for each effect. It n
 records which effects are invulnerable *by specification* and asserts the Entourage's
 flag stays **absent**, with the `canBeSeenAsEnemy` chain named in the failure message
 so the next session cannot re-add it for consistency.
+
+---
+
+### The Tier 2 combat/survival batch — Butterfingers Extreme, Vampire Rules, Earthquake
+Registry is now **58 effects**. All three are entropy 25-50, permanent, `counterplay = true`,
+and in three different categories (COMBAT / SURVIVAL / DEBUFF) so anti-stacking never
+separates them from each other.
+
+#### 1t. THE DAMAGE-DEALT DIRECTION IS NOT THE DAMAGE-TAKEN HOOK IN REVERSE
+Every damage effect before this one — Iron Skin, Fragile, Giant Size, Flamboyant,
+Crouch Invincibility — hooks `hurtServer` with **the player as victim**. Vampire Rules
+needed the player as *attacker*, reading the amount actually applied, and **neither of
+the two obvious hooks carries that number.** Both were checked before writing anything:
+
+| candidate | what its float really is |
+|---|---|
+| `Player.attack` → `hurtOrSimulate` arg 1 (what Behemoth Gauntlets modifies) | damage **sent** — before the victim's armour, enchantments, Resistance and absorption |
+| `LivingEntity.actuallyHurt(ServerLevel, DamageSource, float)` parameter | **still raw** — javap shows `actuallyHurt` calls `getDamageAfterArmorAbsorb` and `getDamageAfterMagicAbsorb` *itself*, so mitigation happens after entry |
+| **`CombatTracker.recordDamage(DamageSource, float)` arg 1** | **the health about to be lost** |
+
+Inside `actuallyHurt` the tail is `recordDamage(source, f)` then
+`setHealth(getHealth() - f)`, with the `f <= 0` early return already taken. So arg 1 is
+exactly what `setHealth` is about to subtract, and it is the **only** place the
+post-mitigation value exists as a value rather than a local expression.
+
+`LivingEntityDamageDealtMixin` is a **read-only `@ModifyArg`** — it returns its argument
+untouched. That shape was chosen over an `@Inject` at the same instruction because the
+`@Inject` cannot see the float without `LocalCapture`, which is the more brittle of the
+two. Nothing else in the project targets `recordDamage`, so there is no chaining
+question (contrast the `@ModifyArg`-not-`@Redirect` rule for Slippery Grip, where two
+sides genuinely shared one call site).
+
+> **Rule: "the final damage" is a different question from "the damage" at three
+> different call sites, and only one of them answers it. Trace to the `setHealth`.**
+
+#### 1u. Hunger's "cap" lives in a PRIVATE method, and the public setters have none
+The overflow-into-saturation requirement turned on whether vanilla actually permits it.
+It does, and the reason is a smaller detail than expected. `FoodData`, javap-verified:
+
+```java
+private void add(int nutrition, float saturation) {
+    this.foodLevel       = Mth.clamp(nutrition + this.foodLevel, 0, 20);
+    this.saturationLevel = Mth.clamp(saturation + this.saturationLevel, 0.0f, (float) this.foodLevel);
+}
+public void eat(int n, float mod)  { add(n, FoodConstants.saturationByModifier(n, mod)); }
+public void setFoodLevel(int i)    { this.foodLevel = i; }        // NO clamp
+public void setSaturation(float f) { this.saturationLevel = f; }  // NO clamp
+```
+
+- **The "normal cap" is saturation clamped to the current food level** — at most 20 and
+  usually less — and it exists *only* inside the private `add`, which is the entire body
+  of `eat`.
+- **Both public setters write the field raw.** Nothing re-clamps afterwards:
+  `FoodData.tick` only ever *drains* saturation (1.0 per 4.0 exhaustion) and never bounds
+  it, and `ClientboundSetHealthPacket` carries saturation as a plain float. Overflow
+  above 20 is stable and survives a relog through `addAdditionalSaveData`.
+
+**So an effect that grants food must not route through `eat`** — it would silently
+discard everything above the food level, which is precisely the value this effect
+exists to produce. The harness asserts `EffectHooks` never calls `eat`.
+
+**The ceiling that ships is ours, not vanilla's.** `MAX_SATURATION = 40.0` (twice
+vanilla's cap) because the overflow is genuinely unbounded in the game and a long
+grinding session would otherwise bank hours of hunger and delete food as a resource for
+the rest of the run.
+
+**"Shank" is two food points, not one.** The bar is 20 points drawn as 10 drumsticks, so
+"8 damage restores 1 shank" is `DAMAGE_PER_FOOD_POINT = 4.0`. Reading it the other way
+halves the effect, and the two readings differ by exactly 2x — worth stating in the
+constant rather than in prose.
+
+**Rounding: the fraction goes to saturation, and that is why nothing is lost.**
+`foodLevel` is an `int`, so a 3-damage hit is worth 0.75 of a point and per-hit
+truncation would throw away most of the value of ordinary weak hits — the same trap
+`EffectHooks.scaleAmount` exists for on the XP side. Rather than carry a per-player
+fractional remainder (run state, needing persistence, for a cosmetic amount of
+nutrition), the **whole part goes to food and the fraction goes to saturation**, which
+is a float. Nutrition is conserved exactly with no state at all; the harness drives 40
+consecutive weak hits and asserts the total to 1e-3.
+
+#### 1v. TRUE DAMAGE IS SONIC BOOM, NOT THE VOID — and the difference is Protection
+The intuitive pick for unmitigated damage is void damage. **It is wrong**, and the
+shipped tag JSON says so in one line. The mitigation pipeline is exactly two gates:
+
+```java
+getDamageAfterArmorAbsorb(src, f):  if (!src.is(BYPASSES_ARMOR)) f = armour + toughness reduction
+getDamageAfterMagicAbsorb(src, f):  if (src.is(BYPASSES_EFFECTS))      return f;
+                                    if (RESISTANCE && !src.is(BYPASSES_RESISTANCE)) f = reduce
+                                    if (src.is(BYPASSES_ENCHANTMENTS)) return f;
+                                    f = Protection-enchantment reduction
+```
+
+| tag | shipped contents |
+|---|---|
+| `#bypasses_armor` | 19 entries, `out_of_world` among them |
+| **`#bypasses_enchantments`** | **`minecraft:sonic_boom`. That is the whole file.** |
+| `#bypasses_effects` | `starve` |
+| `#bypasses_resistance` | `out_of_world`, `generic_kill` |
+
+**So void damage — which ignores armour, Resistance and even invulnerability — is still
+reduced by Protection**, and the Warden's sonic boom is vanilla's *only* precedent for
+damage that armour and enchantments both ignore. An effect built on `out_of_world` would
+be quietly halved by a diamond set, and would have looked correct in every test that did
+not equip armour.
+
+**Earthquake ships its own type rather than borrowing `sonic_boom`**, for the death
+message: sonic boom renders as "was obliterated by a sonically-charged shriek".
+`entropymod:tremor` is three small JSON files —
+`data/entropymod/damage_type/tremor.json` (`"scaling": "never"`, `"exhaustion": 0.0`,
+`"message_id": "tremor"`) plus one-entry files at
+`data/minecraft/tags/damage_type/bypasses_armor.json` and `.../bypasses_enchantments.json`
+— and one lang key. **Tag files merge additively across namespaces unless a file sets
+`"replace": true`**, the same property the mod's `potion.potency.*` lang entries rely on
+for assets; the harness asserts both copies of each tag are on the classpath and that
+neither sets `replace`.
+
+**Stated rather than hidden, what it still does not bypass:** Resistance (deliberate —
+`#bypasses_resistance` holds only the two kill-everything types, and a potion the player
+chose to drink should count), and the mod's own `EffectHooks.damageTakenMultiplier`, so
+Iron Skin and Giant Size scale it and Crouch Invincibility cancels it outright. Those are
+effect-vs-effect interactions, not armour.
+
+**No attacker on the `DamageSource`**, deliberately: `LivingEntity.hurtServer` only
+applies knockback when the source has an entity, so an attacker-less source shakes the
+player without shoving them — the effect gets `#no_knockback`'s behaviour for free.
+
+**Classpath trap this created, and it broke the harness's first draft:** once the mod
+ships a file at a *vanilla* resource path, `getResourceAsStream` returns whichever copy
+the classloader reaches first — the mod's, containing one entry. The first version of the
+"void is in `bypasses_armor`" check read the mod's one-line file and cheerfully reported
+that it was not. **Any tag assertion for a path the mod also writes must use
+`getResources` (plural) and check every copy.**
+
+#### 1w. `INVULNERABLE_DURATION` SETS THE FLOOR ON ANY MULTI-HIT EFFECT
+Earthquake's tremor is **80 ticks (4 seconds)** with the two half-heart hits at **tick 0
+and tick 80**. The duration was open in the brief; its lower bound is not a taste
+decision.
+
+In `LivingEntity.hurtServer` a landed hit sets `invulnerableTime = 20`, and while that
+counter is **above 10** a second hit of *equal or smaller* size is discarded outright
+rather than queued. So **two 1.0-damage hits closer than 10 ticks apart are one hit**,
+and an effect that promised two would silently deliver one — invisible in play and
+invisible to a build. 80 ticks gives an 8x margin, so the promise does not rest on it.
+
+The ceiling is playability: Slowness II is a 30% movement penalty arriving every 45-180s,
+and much past four seconds it defines the minute rather than interrupting it.
+
+**Hits at the start and end rather than evenly spaced**, because that makes the window
+legible: the first hit says it began, the second says it ended, and the Slowness is
+bracketed by them. Evenly spacing two hits inside 80 ticks puts them at 27 and 53, so the
+two moments the player must react to — the start and the end — are the two moments
+nothing happens.
+
+#### 1x. SpawnSchedule WITHOUT SafeSpawn — they are two components, not one
+Earthquake reuses `SpawnSchedule` verbatim (900-3600 ticks, re-rolled per fire, one timer
+per player, unconditional `retainAll`) and **references `SafeSpawn` nowhere**. The two
+arrived together for Unstable and Creeper Magnet and it would be easy to treat them as
+one mechanism; the spawn cluster's own post-mortem is the reason not to, since every line
+of `SafeSpawn` needed a `ServerLevel` and that is exactly what made it the untested half
+that broke. The harness asserts the absence.
+
+A tremor is 80 ticks long and acts on two of them, so the schedule alone is not enough:
+firing opens a window that is then counted down (`EarthquakeService.ACTIVE`, an
+elapsed-tick counter per player). It is transient for the same reason the schedule is.
+Both decisions it drives — `isDamageTick`, `isFinished` — are Minecraft-free statics on
+`EarthquakeBehavior` so the harness drives them, including the 10-tick separation check.
+The running tremor is advanced **before** the schedule is ticked, so a new tremor can
+never start on a tick the previous one is still using.
+
+#### 1y. Butterfingers Extreme: vanilla has two drop profiles and only one is a throw
+`Player.drop(ItemStack, boolean)` is `drop(stack, dropAround = false, includeThrowerName
+= arg)`, and `LivingEntity.createItemStackToDrop` branches on `dropAround`:
+
+| `dropAround` | velocity | used by |
+|---|---|---|
+| `true` | random bearing, horizontal speed `nextFloat() * 0.5`, fixed `+0.2` up | death drops, scatter |
+| **`false`** | **`0.3` along the look vector** (pitch and yaw), plus up to `0.02` scatter | the Q key |
+
+The effect uses the second: the player is mid-swing and therefore facing their target, so
+a look-directed throw at 0.3 b/t sends the item forward past the mob (roughly 3-4 blocks
+before it settles), which reads as the weapon being torn out of the swing. Going through
+`Player.drop` rather than building an `ItemEntity` brings three things for free — the
+spawn point at `getEyeY() - 0.3` rather than at the feet, `setThrower(player)`, and the
+pickup delay so it cannot be re-collected on the tick it leaves.
+
+**`Player.drop` does NOT remove anything from the inventory** — vanilla's own Q path calls
+`Inventory.removeFromSelected` first. Copy, clear, then drop; the reverse order duplicates
+the item.
+
+**The anchor is the landed hit, and `TAIL` would have been wrong twice.** `Player.attack`
+has **three** `RETURN` instructions — offsets 8 (`cannotAttack`), 87 (the cooldown/miss
+path) and 350 — and Mixin's `TAIL` binds only the last, so a miss would fire nothing or,
+worse, fire depending on which early return happened to be last after a vanilla refactor.
+The injection is `SHIFT.AFTER` on `Entity.hurtOrSimulate`, javap-verified as occurring
+**exactly once** inside `attack` (offset 242) — the same single call site
+`PlayerAttackDamageMixin` modifies the damage argument of.
+
+**Two mixins on one call site is safe here**, and the distinction matters against the
+Slippery Grip shape rule: that rule is about two handlers that both *write* one value.
+This is an `@ModifyArg` on the argument and an `@Inject` after the call — different
+things, neither cancels, and the order between them is fixed by the instruction rather
+than by injection priority.
+
+**Chance is 10%, deliberately above Clumsy Digger's 8%, and the two are not comparable.**
+Clumsy Digger is an *invisible rate* whose chance is one factor in a product that has to
+reach detectability; this is a *discrete visible event* whose risk is the opposite one,
+"is it even on" — the failure that retuned Leaky Pockets from 4% to 7%.
+
+| chance | mean attacks between flings | P(incident in a 4-hit fight) |
+|---|---|---|
+| 3% | 33.3 | 11.5% |
+| 6% | 16.7 | 21.9% |
+| **10%** | **10.0** | **34.4% — about one fight in three** |
+| 15% | 6.7 | 47.8% — every other fight |
+
+**Scope is anything in the main hand, not "weapons"** — same rule and reason as Behemoth
+Gauntlets: there is no principled definition of "weapon" available at that point (tools
+are data-driven, there is no `SwordItem` hierarchy), and "whatever you are holding" is
+legible where "whatever the game considers a weapon" is not. **An empty hand rolls
+nothing and consumes nothing**, which makes bare-handed combat a complete counterplay.

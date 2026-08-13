@@ -9,6 +9,7 @@ import com.entropymod.entropy.growth.DangerSenseGlow;
 import com.entropymod.entropy.growth.GreenThumbGrowth;
 import com.entropymod.entropy.growth.SlashedPocketsSweep;
 import com.entropymod.entropy.companion.CompanionService;
+import com.entropymod.entropy.quake.EarthquakeService;
 import com.entropymod.entropy.spawn.CreeperMagnetSpawner;
 import com.entropymod.entropy.spawn.UnstableSpawner;
 import com.entropymod.network.ChoiceMadePayload;
@@ -188,6 +189,10 @@ public class EntropyMod implements ModInitializer {
 			// Follow-and-defend for the companions vanilla will not do it for. Loyal
 			// Pack is deliberately absent -- wolves get both free from their own goals.
 			CompanionService.tick(server);
+			// Earthquake: a schedule of ours, so a tick service like the two spawn
+			// effects -- but it spawns nothing, so no SafeSpawn. Returns on a single
+			// hash lookup for a run that does not hold it.
+			EarthquakeService.tick(server);
 		});
 
 		// Both services' state is transient, not part of the run, so neither is
@@ -206,6 +211,8 @@ public class EntropyMod implements ModInitializer {
 			// Companion movement state -- stall windows and approach flags. Transient
 			// by design: it describes the last three seconds, not the run.
 			CompanionService.reset();
+			// The tremor cadence and any part-finished tremor: this session, not the run.
+			EarthquakeService.reset();
 		});
 
 		LOGGER.info("Entropy Mod ready. Default interval: {} ticks ({} min), cap: {}",

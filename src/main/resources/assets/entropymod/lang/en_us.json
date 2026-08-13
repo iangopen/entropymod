@@ -3,5 +3,7 @@
   "potion.potency.6": "VII",
   "potion.potency.7": "VIII",
   "potion.potency.8": "IX",
-  "potion.potency.9": "X"
+  "potion.potency.9": "X",
+  "_comment_tremor": "Earthquake ships its own damage type entropymod:tremor (see EntropyDamageTypes), so it needs its own death message key. message_id 'tremor' -> death.attack.tremor.",
+  "death.attack.tremor": "%1$s was shaken apart by the earth"
 }
