@@ -3746,3 +3746,171 @@ whole 16-20 ring, seen and unseen, resolves to `FROZEN` or `IDLE` and never to
 villager's recorded state so `wasApproaching` is false, and `SafeSpawn`'s horizontal
 band plus the 8-block vertical search gives a worst-case 3D landing of
 `hypot(20, 8) = 21.54`, still inside lost-track at 32.
+
+---
+
+### The three-bug companion session — one refutation, two confirmed root causes
+
+Three in-game reports: *golems invisible*, *the Audience does not follow a teleport
+or dimension change*, *the Audience's look-at-player fires occasionally rather than
+continuously*. Two resolved to confirmed root causes with fixes; one is a
+**refutation with no cause yet established**, recorded honestly as such.
+
+#### 1p. A COMPONENT THAT IS CORRECT AND SIMPLY NEVER INVOKED — a new failure mode
+This is the durable finding of the session and it is distinct from every mode in
+CLAUDE.md's catalogue. Those are all about a change that *runs* and is then
+overridden, re-clamped, discarded or mistimed. **This one never runs at all.**
+
+`CompanionService.gather` was correct, tested, and wired — to
+`ServerPlayerEvents.JOIN`, `AFTER_RESPAWN` and
+`ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL`. **An ordinary
+same-dimension teleport is none of those.** javap on
+`ServerPlayer.teleport(TeleportTransition)`:
+
+| offset | what |
+|---|---|
+| 35–45 | load `transition.newLevel()` and the current `level().dimension()` |
+| **62–67** | `if_acmpne 104` — *are the two dimensions different?* |
+| 71–100 | **same dimension:** `connection.teleport(...)`, `resetPosition()`, `postTeleportTransition`, **return** |
+| 104–287 | different dimension: `removePlayerImmediately`, `setServerLevel`, `addDuringTeleport` |
+| **289** | **`triggerDimensionChangeTriggers(oldLevel)`** |
+
+and Fabric's `ServerPlayerMixin` fires `AFTER_PLAYER_CHANGE_LEVEL` from **exactly
+one place**: `@Inject(method = "triggerDimensionChangeTriggers", at = @At("TAIL"))`.
+So a `/tp`, an ender pearl, a chorus fruit and every command-driven move take the
+early branch and fire **nothing**. Confirmed in `run/logs/latest.log`: four `/tp`s
+with The Audience held, and not one `Companion gather` line — the recovery had never
+executed in play.
+
+**The harness could not have caught it, and the reason generalises.** It drove
+`shouldGather` with the real post-respawn distances (400.9–407.0) and passed. There
+was even a wiring assertion — `classReferences(EntropyMod.class, "gather")` — and it
+passed too. **A call site existing is not the same claim as the events it is
+registered on being the events the player's action fires.** The first proves a
+reference in a constant pool; the second is about vanilla's control flow, and only
+bytecode answers it.
+
+> **Rule: when a recovery is bound to an event, establish by bytecode which vanilla
+> code path actually reaches that event, and test the trigger and the decision as
+> ONE path. Testing the decision alone will pass for a component nothing calls.**
+
+**The fix does not add a fourth event — it stops depending on events.**
+`CompanionMotion.TeleportWatch` samples each player's position every tick and reports
+a discontinuity: a level change (unconditional), or a single-tick move past
+`TELEPORT_DELTA` = **16 blocks**. Sixteen is not tuned; it is the same number and the
+same argument as `TramplePath.MAX_SEGMENT` — the fastest sustained travel in the game
+is elytra-with-rockets at roughly **2 blocks/tick**, so 16 is a gap between what
+movement can produce and what only a discontinuity can. A false positive is harmless
+anyway, because `shouldGather` is re-asked per companion and anything inside 12
+blocks is left alone. Minecraft-free, so the harness drives the **trigger**: 1200
+consecutive elytra-speed ticks never fire it, a `/tp` does, a nether portal does even
+though it *divides* the coordinates by 8, and the tick after a jump does not re-fire.
+
+Two rules the class exists to hold, both asserted:
+
+- **`rebase` after an event-driven gather.** Otherwise the JOIN/RESPAWN/DIMENSION
+  path gathers and the watcher reports the same jump again one tick later.
+- **`retain` is unconditional** — the identical guard `SpawnSchedule`'s harness
+  already caught, where one player leaving as another joins leaves the sizes equal
+  and the departed entry behind forever.
+
+**Corrected from the previous session's record:** the entry above says the Audience's
+gather recovery "was ALREADY BUILT — verify before rebuilding". That is true of the
+`GATHER_SPECS` entry and the landing-ring proof, and it is exactly the kind of
+statement that stops the next session looking further. The recovery was built. **The
+trigger for the reported case did not exist.**
+
+#### 1q. `EntityTracker.isVisibleBy` IS NOT A RAY CAST — it is the mob's own sensor
+The Audience's look-at-player fired intermittently. The write was correct;
+`LookAtTargetSink` was **deleting** it. Four javap-verified steps, and the failure is
+inevitable rather than occasional once they are laid out:
+
+1. `LookAtTargetSink.canStillUse` is
+   `getMemory(LOOK_TARGET).filter(t -> t.isVisibleBy(mob)).isPresent()`, and its
+   `stop()` is a bare `brain.eraseMemory(LOOK_TARGET)`. **A tracker that answers "not
+   visible" does not merely fail to turn the head — it erases what you just wrote.**
+2. `EntityTracker.isVisibleBy(mob)` for a `LivingEntity` target is
+   `mob.getBrain().getMemory(NEAREST_VISIBLE_LIVING_ENTITIES).map(n -> n.contains(target))`.
+   No clip, no ray — **the mob's own perception memory.**
+3. That memory comes from `NearestLivingEntitySensor.doTick`:
+   `getEntitiesOfClass(LivingEntity.class, getBoundingBox().inflate(getAttributeValue(FOLLOW_RANGE)), ...)`,
+   wrapped in a `NearestVisibleLivingEntities` whose `contains` additionally applies
+   the sensor's own line-of-sight predicate. `Sensor()` is `this(20)`, so it refreshes
+   only every 20 ticks.
+4. **`Villager.createAttributes` sets only `MOVEMENT_SPEED` (0.5)**, so `FOLLOW_RANGE`
+   is `Mob.createMobAttributes()`'s **16.0** — finding 1e's 16-not-32 trap again.
+
+**The Audience deliberately holds the player at `MIN_DISTANCE` 16 to
+`LOST_TRACK_DISTANCE` 32.** So the player was outside the villager's own sensor box
+essentially always, and the sink erased the memory on the next brain tick. The look
+engaged only in the moments a villager happened to sit inside 16 blocks with clear
+sight — which is precisely "occasionally, not continuously". Refreshing every tick
+(which the code already did, correctly) could not help: the erase happens on the
+brain tick that follows each write.
+
+**Fix: `BlockPosTracker`, whose `isVisibleBy` is literally `iconst_1; ireturn`.**
+Unconditionally visible, so the sink can never stop and can never erase. Built from
+`player.getEyePosition()` **every tick**, which is what makes a fixed-position tracker
+equivalent to a following one — never more than a tick stale, and `BlockPosTracker(Vec3)`
+stores the vector exactly rather than rounding to a block centre.
+
+**The rejected alternative is worth recording:** raising the villagers' `FOLLOW_RANGE`
+to 32+ would also work, and would widen every *other* consumer of
+`NEAREST_VISIBLE_LIVING_ENTITIES` — hostile avoidance, panic, social interaction — as
+a side effect of a cosmetic fix, while still losing the look behind any wall.
+
+**And the harness was green on the bug, for the second time in this class.** The
+shipped assertion was `classReferences(CompanionService, "EntityTracker")` with the
+message *"...as an EntityTracker on the player, tracking eye height so they look at
+your face"* — written from the same javadoc that chose the wrong tracker. **1k again:
+a test derived from a component's own doc comment can only catch drift, never a wrong
+specification.** It now asserts the *property* the tracker must have, against the
+consumer that was deleting the memory.
+
+#### 1r. Golems invisible: the shared-flags hypothesis is REFUTED, and no mod-reachable path to invisibility exists
+Investigated as a Danger-Sense-style packed-flag collision — `setInvulnerable` or
+`setPlayerCreated` flipping the invisible bit inside `Entity.DATA_SHARED_FLAGS_ID`
+alongside the intended one. **It is not that, in both directions:**
+
+- **`Entity.setInvulnerable(boolean)` is four instructions: `aload_0; iload_1;
+  putfield invulnerable:Z; return`.** A plain non-synced field. It touches no synched
+  data at all and is **never transmitted to the client**.
+- **`IronGolem.DATA_FLAGS_ID` is IronGolem's own accessor**, `SynchedEntityData
+  .defineId(IronGolem.class, BYTE)` — constant-pool entry `#96 = Fieldref
+  IronGolem.DATA_FLAGS_ID`, not `Entity.DATA_SHARED_FLAGS_ID`. `setPlayerCreated`
+  reads and writes bit 0 of that separate byte.
+- **No subclass overrides `setInvulnerable` or `setInvisible`** anywhere from
+  `LivingEntity` down to `IronGolem`.
+
+Two stronger, negative results follow, and they are the reusable part:
+
+- **`setInvisible` is referenced by exactly two classes in the whole
+  `net.minecraft.world.entity` package: `Entity` (the definition) and `LivingEntity`.**
+  `LivingEntity.updateInvisibilityStatus()` is `setInvisible(hasEffect(INVISIBILITY))`
+  and nothing else. **So server-side invisibility requires the Invisibility mob
+  effect, and this mod grants it to no companion.**
+- **The only client-side route to a skipped render is that same flag.**
+  `LivingEntityRenderer.isBodyVisible` is `!state.isInvisible`; `getRenderType`
+  returns null only when the body is invisible, not translucent and not glowing; and
+  `isInvulnerable` is read by **no** class in `net.minecraft.server.level` or in any
+  renderer.
+
+**So the reported symptom cannot be caused by anything this mod sets, and no fix is
+claimed.** What the investigation also found is why the report could not be resolved
+from evidence: `CompanionSpawner` logged **only on shortfall**, so a successful
+placement said nothing at all, and "the golems did not appear" and "the golems
+appeared eight blocks below the ledge you were standing on" produced identical
+records. That is 1g verbatim. `CompanionSpawner` now logs every placement at INFO
+with the block position, the horizontal distance and **`dy` called out separately** —
+the relevant number, because `SafeSpawn` measures companion bands *horizontally* and
+may move a candidate up to `VERTICAL_SEARCH` = 8 blocks vertically, so a golem can be
+comfortably inside its 2–6 band and still be out of sight over an edge. It also logs
+`addFreshEntity`'s return value, which nothing had ever checked.
+
+> **Rule, and it is the same one 1g states: a spawn that logs only its failures is a
+> spawn nobody can debug. Log where the thing actually landed.**
+
+#### Mapping note: `ResourceKey.location()` does not exist
+It is **`ResourceKey.identifier()`** in this mapping (alongside `registry()` and
+`registryKey()`). Every tutorial writes `level.dimension().location()`; it fails to
+compile here.

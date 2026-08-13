@@ -14,11 +14,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
-import net.minecraft.world.entity.ai.behavior.EntityTracker;
+import net.minecraft.world.entity.ai.behavior.BlockPosTracker;
 import net.minecraft.world.entity.ai.memory.MemoryModuleType;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -87,6 +88,15 @@ public final class CompanionService {
 	private static final Map<String, CompanionMotion.AudienceState> AUDIENCE_STATE =
 			new HashMap<>();
 
+	/**
+	 * Per-player position history, purely to notice the discontinuities no event
+	 * reports. See {@link CompanionMotion.TeleportWatch} for the bytecode showing that
+	 * a same-dimension teleport fires none of the three hooks {@code gather} was
+	 * wired to.
+	 */
+	private static final CompanionMotion.TeleportWatch TELEPORTS =
+			new CompanionMotion.TeleportWatch();
+
 	private CompanionService() {}
 
 	public static void tick(MinecraftServer server) {
@@ -106,9 +116,23 @@ public final class CompanionService {
 		boolean stallSample = server.getTickCount() % CompanionMotion.STALL_SAMPLE_INTERVAL == 0;
 		CompanionRoster roster = manager.companions();
 
+		Set<String> live = new HashSet<>();
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
 			if (player.isSpectator()) {
 				continue;
+			}
+			String owner = player.getUUID().toString();
+			live.add(owner);
+			// EVERY tick, not on the movement cadence: a teleport is a single-tick
+			// event, and sampling one tick in five would compare a post-teleport
+			// position against another post-teleport position four times out of five --
+			// i.e. would miss the jump entirely. It is two map writes and a squared
+			// distance per player.
+			if (TELEPORTS.sample(owner, player.level().dimension().identifier().toString(),
+					player.getX(), player.getY(), player.getZ())) {
+				EntropyMod.LOGGER.debug("Companion gather: {} jumped -- recovering companions",
+						player.getName().getString());
+				gather(server, player);
 			}
 			if (movementPass) {
 				// Catch-up applies to the three FOLLOWING effects. The Audience is
@@ -138,12 +162,14 @@ public final class CompanionService {
 				audienceLook(player, roster);
 			}
 		}
+		TELEPORTS.retain(live);
 	}
 
 	/** Drops all transient movement state. Called on server stop. */
 	public static void reset() {
 		STALLS.reset();
 		AUDIENCE_STATE.clear();
+		TELEPORTS.reset();
 	}
 
 	// ==================================================================
@@ -243,6 +269,14 @@ public final class CompanionService {
 				moved++;
 			}
 		}
+
+		// Re-baseline the teleport watcher, so a gather an EVENT drove (join, respawn,
+		// dimension change) is not reported a second time by the per-tick watcher on
+		// the next pass. Also creates the baseline on join, before tick() has ever seen
+		// this player -- otherwise the first sample after a login would have nothing to
+		// compare against and the watcher would start one tick late.
+		TELEPORTS.rebase(owner, level.dimension().identifier().toString(),
+				player.getX(), player.getY(), player.getZ());
 
 		if (moved > 0 || unresolved > 0) {
 			EntropyMod.LOGGER.info(
@@ -451,8 +485,53 @@ public final class CompanionService {
 	 * gradual turn rate is indistinguishable from the feature not working. The cost is
 	 * one map lookup and one memory write per villager per tick.
 	 *
-	 * <p>{@code EntityTracker(player, true)} tracks the player's <em>eye</em> height,
-	 * so they look at your face rather than your feet.
+	 * <h2>...and why an {@code EntityTracker} was still the wrong tracker</h2>
+	 *
+	 * <p>The first version wrote {@code new EntityTracker(player, true)} and the look
+	 * fired only occasionally. <b>The write was correct and something downstream threw
+	 * it away</b> -- CLAUDE.md failure mode 2, again, and again without a mixin
+	 * involved. The chain, all javap-verified:
+	 *
+	 * <ol>
+	 *   <li>{@code LookAtTargetSink.canStillUse} is
+	 *       {@code getMemory(LOOK_TARGET).filter(t -> t.isVisibleBy(mob)).isPresent()},
+	 *       and its {@code stop()} is a bare
+	 *       {@code brain.eraseMemory(LOOK_TARGET)}. So a tracker that answers "not
+	 *       visible" does not merely fail to turn the head -- <b>it deletes the memory
+	 *       we just wrote.</b></li>
+	 *   <li>{@code EntityTracker.isVisibleBy(mob)} for a {@code LivingEntity} target is
+	 *       <b>not</b> a ray cast. It is
+	 *       {@code mob.getBrain().getMemory(NEAREST_VISIBLE_LIVING_ENTITIES)
+	 *       .map(n -> n.contains(target))}.</li>
+	 *   <li>That memory is written by {@code NearestLivingEntitySensor.doTick}, from
+	 *       {@code getEntitiesOfClass(LivingEntity.class,
+	 *       getBoundingBox().inflate(getAttributeValue(FOLLOW_RANGE)), ...)}.</li>
+	 *   <li><b>{@code Villager.createAttributes} sets only {@code MOVEMENT_SPEED}</b>,
+	 *       so {@code FOLLOW_RANGE} is {@code Mob.createMobAttributes()}'s <b>16.0</b>
+	 *       -- the same 16-not-32 trap Creeper Magnet's spawn distance hit.</li>
+	 * </ol>
+	 *
+	 * <p><b>The Audience holds at {@code MIN_DISTANCE} 16 to {@code LOST_TRACK} 32.</b>
+	 * So the player was outside the villager's own sensor box essentially all the time,
+	 * {@code isVisibleBy} answered false, and the sink erased the memory on the very
+	 * next brain tick. The look engaged only in the moments a villager happened to sit
+	 * inside 16 blocks with clear line of sight -- which is exactly "occasionally,
+	 * not continuously". The sensor's 20-tick scan rate ({@code Sensor()} is
+	 * {@code this(20)}) coarsened it further.
+	 *
+	 * <p><b>{@code BlockPosTracker.isVisibleBy} is literally {@code iconst_1; ireturn}
+	 * -- unconditionally true.</b> So the sink can never stop for lack of visibility
+	 * and can never erase the memory, and the look holds continuously at any distance.
+	 * Constructed from {@code player.getEyePosition()} on <em>every</em> tick, which is
+	 * what makes a fixed-position tracker equivalent to a following one: the position
+	 * is never more than a tick stale, and {@code BlockPosTracker(Vec3)} stores the
+	 * vector exactly rather than rounding it to a block centre.
+	 *
+	 * <p>The alternative -- raising the villagers' {@code FOLLOW_RANGE} to 32+ so the
+	 * sensor keeps the player in range -- was rejected: it would work, and it would
+	 * also widen every other consumer of {@code NEAREST_VISIBLE_LIVING_ENTITIES}
+	 * (hostile avoidance, panic, social interaction) as a side effect of a cosmetic
+	 * fix, and it would still lose the look behind any wall.
 	 */
 	private static void audienceLook(ServerPlayer player, CompanionRoster roster) {
 		List<String> ids = roster.uuidsFor(player.getUUID().toString(), TheAudienceBehavior.ID);
@@ -475,7 +554,7 @@ public final class CompanionService {
 				continue;
 			}
 			villager.getBrain().setMemory(MemoryModuleType.LOOK_TARGET,
-					new EntityTracker(player, true));
+					new BlockPosTracker(player.getEyePosition()));
 		}
 	}
 

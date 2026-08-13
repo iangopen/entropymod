@@ -141,6 +141,8 @@ public final class HarnessMain {
 		spawnBatch();
 		companionBatch();
 		companionMotion();
+		companionGatherTrigger();
+		companionAudienceLook();
 		System.exit(Checks.summary());
 	}
 
@@ -4265,6 +4267,163 @@ public final class HarnessMain {
 						+ "never touches the other");
 	}
 
+	/**
+	 * THE TRIGGER, not the decision.
+	 *
+	 * <h2>The gap that let this ship broken, stated explicitly</h2>
+	 *
+	 * <p>{@code companionsSurviveDeathRespawn} above drives {@code shouldGather} with
+	 * real post-respawn distances and passes. It has always passed. <b>It tests what
+	 * the recovery decides when it is asked, and nothing in this harness ever tested
+	 * that anything asks it.</b> The one wiring assertion --
+	 * {@code classReferences(EntropyMod.class, "gather")} -- proves a call site exists;
+	 * it cannot prove the events that call site is registered on are the events a
+	 * player's teleport actually fires. They are not:
+	 * {@code ServerPlayer.teleport(TeleportTransition)} compares dimensions at offset
+	 * 62 and, when they match, returns through the branch at 104, never reaching the
+	 * {@code triggerDimensionChangeTriggers} call at 289 that is Fabric's only source
+	 * for {@code AFTER_PLAYER_CHANGE_LEVEL}.
+	 *
+	 * <p>So a same-dimension {@code /tp}, an ender pearl and a chorus fruit fired
+	 * nothing at all, and the companions stayed put -- a component that was correct
+	 * and simply never invoked. The trigger now lives in {@code CompanionMotion} as a
+	 * plain function over positions, precisely so it can be driven here alongside the
+	 * decision it feeds.
+	 */
+	private static void companionGatherTrigger() {
+		section("Companion gather: the TRIGGER fires (not just the decision)");
+
+		checkNear(constant(CompanionMotion.class, "TELEPORT_DELTA"), 16.0, 1e-9,
+				"a single-tick move of 16 blocks is the discontinuity threshold -- the same "
+						+ "number and reasoning as TramplePath.MAX_SEGMENT, chosen as a gap "
+						+ "between what movement can produce (~2 b/tick on elytra) and what "
+						+ "only a teleport can");
+
+		CompanionMotion.TeleportWatch watch = new CompanionMotion.TeleportWatch();
+		String p = "player-1";
+		String over = "minecraft:overworld";
+		String nether = "minecraft:the_nether";
+
+		check(!watch.sample(p, over, 0, 64, 0),
+				"the FIRST sample is never a jump -- there is no previous position, and "
+						+ "reporting one would gather on every login");
+
+		// --- ordinary movement across a whole minute never trips it ---------------
+		boolean tripped = false;
+		double x = 0.0;
+		for (int tick = 0; tick < 1200; tick++) {
+			// 0.28 b/tick is a walk; 2.0 is elytra-with-rockets, the fastest sustained
+			// travel in the game. Use the fast one -- if that is safe, walking is.
+			x += 2.0;
+			tripped |= watch.sample(p, over, x, 64, 0);
+		}
+		check(!tripped,
+				"1200 consecutive ticks of ELYTRA-speed flight (2 blocks/tick, 2400 blocks "
+						+ "covered) never reports a jump -- the trigger cannot fire on movement");
+
+		// --- the reported case: a same-dimension /tp ------------------------------
+		check(watch.sample(p, over, x + 200.0, 70, 300.0),
+				"a /tp within one dimension DOES fire the trigger -- this is the reported "
+						+ "bug, and before the fix no event in the game reported it");
+		check(!watch.sample(p, over, x + 200.5, 70, 300.0),
+				"...and the tick after the teleport does not fire again, so one jump means "
+						+ "one gather rather than a gather every tick");
+
+		// --- and it is a jump that shouldGather then acts on ----------------------
+		check(CompanionMotion.shouldGather(true, Math.sqrt(200.0 * 200.0 + 300.0 * 300.0)),
+				"the companions left behind by that /tp are past CATCH_UP_DISTANCE, so the "
+						+ "decision the trigger feeds says move them -- trigger and decision "
+						+ "checked as one path, which is what was missing");
+
+		// --- dimension change: reported unconditionally, however small the move ---
+		CompanionMotion.TeleportWatch dim = new CompanionMotion.TeleportWatch();
+		dim.sample(p, over, 10, 64, 10);
+		check(dim.sample(p, nether, 10, 64, 10),
+				"a DIMENSION CHANGE fires the trigger even when the coordinates barely move "
+						+ "-- a nether portal divides the position by 8, so distance alone "
+						+ "would not have caught it");
+
+		// --- an event-driven gather must not be re-reported by the watcher --------
+		CompanionMotion.TeleportWatch rebased = new CompanionMotion.TeleportWatch();
+		rebased.sample(p, over, 0, 64, 0);
+		rebased.rebase(p, nether, 500, 30, 500);
+		check(!rebased.sample(p, nether, 500, 30, 500),
+				"rebase() after an EVENT-driven gather stops the watcher reporting the same "
+						+ "discontinuity a second time on the next tick");
+
+		// --- departed players are pruned unconditionally --------------------------
+		// The exact guard SpawnSchedule's harness caught: a size comparison leaves a
+		// departed player's history behind whenever someone else joins in the same pass.
+		CompanionMotion.TeleportWatch pruned = new CompanionMotion.TeleportWatch();
+		pruned.sample("gone", over, 0, 64, 0);
+		pruned.sample("stayed", over, 0, 64, 0);
+		pruned.retain(java.util.Set.of("stayed", "joined"));
+		check(!pruned.isTracking("gone") && pruned.isTracking("stayed"),
+				"retain() drops a departed player even when the set sizes match, so a leaver "
+						+ "plus a joiner in one pass cannot leak history");
+
+		// --- the trigger is wired into the tick loop, every tick ------------------
+		check(Checks.classReferences(CompanionService.class, "TeleportWatch")
+						|| Checks.classReferences(CompanionService.class, "sample"),
+				"CompanionService samples the watch itself rather than leaving it to an "
+						+ "event -- the whole point of the fix");
+		check(Checks.classReferences(CompanionService.class, "rebase"),
+				"...and re-baselines after a gather, so the event path and the tick path "
+						+ "cannot double-fire");
+	}
+
+	/**
+	 * The Audience's look target, and the downstream consumer that was deleting it.
+	 *
+	 * <p>Reported as "they turn to watch occasionally, not continuously". The write was
+	 * correct; {@code LookAtTargetSink.canStillUse} threw it away. See
+	 * {@code CompanionService.audienceLook} for the full javap chain -- the short form
+	 * is that {@code EntityTracker.isVisibleBy} resolves through
+	 * {@code NEAREST_VISIBLE_LIVING_ENTITIES}, which is built from the villager's own
+	 * {@code FOLLOW_RANGE} of <b>16</b>, while this effect deliberately holds the
+	 * player at 16-32.
+	 */
+	private static void companionAudienceLook() {
+		section("The Audience: the look target must survive the brain's own sink");
+
+		double min = constant(TheAudienceBehavior.class, "MIN_DISTANCE");
+		double lost = constant(TheAudienceBehavior.class, "LOST_TRACK_DISTANCE");
+
+		// The arithmetic that makes the bug inevitable rather than occasional. 16.0 is
+		// Mob.createMobAttributes()'s FOLLOW_RANGE, which Villager.createAttributes does
+		// not override -- the same 16-not-32 fact Creeper Magnet's spawn band turned on.
+		double villagerFollowRange = 16.0;
+		check(min >= villagerFollowRange,
+				"the Audience's MIN_DISTANCE (" + min + ") is at or beyond a villager's own "
+						+ "FOLLOW_RANGE (16.0), so an EntityTracker look target could NEVER "
+						+ "be reliably visible -- the effect's whole standoff band sits "
+						+ "outside the sensor that decides it");
+		check(lost > villagerFollowRange * 1.5,
+				"and LOST_TRACK_DISTANCE (" + lost + ") is twice it, so most of the corridor "
+						+ "was not merely marginal but hopeless");
+
+		check(Checks.classReferences(CompanionService.class, "BlockPosTracker"),
+				"the look target is a BlockPosTracker, whose isVisibleBy is an "
+						+ "unconditional 'true' -- so the sink can never stop for lack of "
+						+ "visibility and can never erase the memory");
+		check(!Checks.classReferences(CompanionService.class, "EntityTracker"),
+				"...and the EntityTracker is GONE rather than left as a fallback: a "
+						+ "distance-limited tracker that silently deletes the memory is "
+						+ "exactly the code a later session would re-wire believing it safe");
+		check(Checks.classReferences(CompanionService.class, "getEyePosition"),
+				"it is built from the player's EYE position every tick, which is what makes "
+						+ "a fixed-position tracker equivalent to a following one");
+
+		// The gate is unchanged, and asserted so the fix cannot have widened it.
+		check(!CompanionMotion.shouldWatchPlayer(CompanionMotion.AudienceState.APPROACHING),
+				"a villager mid-approach still looks where it is going");
+		for (CompanionMotion.AudienceState s : List.of(CompanionMotion.AudienceState.FROZEN,
+				CompanionMotion.AudienceState.IDLE, CompanionMotion.AudienceState.BACK_OFF)) {
+			check(CompanionMotion.shouldWatchPlayer(s),
+					"...and every other state (" + s + ") watches the player");
+		}
+	}
+
 	/** The roster's own rules -- keying, counting, forgetting. */
 	private static void companionRosterRules() {
 		section("CompanionRoster: keying and bookkeeping");
@@ -4671,10 +4830,17 @@ public final class HarnessMain {
 						com.entropymod.entropy.companion.CompanionService.class, "LOOK_TARGET"),
 				"THE MECHANISM: the look is written into the brain's own LOOK_TARGET "
 						+ "memory, so vanilla's LookAtTargetSink performs the rotation");
+		// This assertion used to require an EntityTracker, and it was green while the
+		// look was firing "occasionally" in play -- CLAUDE.md 1k for the second time in
+		// this class: it was written from the same javadoc that described the wrong
+		// mechanism, so it could only ever catch drift, never a wrong choice. What the
+		// tracker has to satisfy is now checked in companionAudienceLook, against the
+		// consumer that was deleting the memory rather than against the prose.
 		check(Checks.classReferences(
-						com.entropymod.entropy.companion.CompanionService.class, "EntityTracker"),
-				"...as an EntityTracker on the player, tracking eye height so they look at "
-						+ "your face");
+						com.entropymod.entropy.companion.CompanionService.class, "BlockPosTracker"),
+				"...as a BlockPosTracker at the player's eye position, refreshed every tick "
+						+ "-- see companionAudienceLook for why the EntityTracker could not "
+						+ "survive LookAtTargetSink.canStillUse beyond 16 blocks");
 		check(!Checks.classReferences(
 						com.entropymod.entropy.companion.CompanionService.class, "getLookControl"),
 				"REFUTED ROUTE: the service does NOT call getLookControl/setLookAt. That "

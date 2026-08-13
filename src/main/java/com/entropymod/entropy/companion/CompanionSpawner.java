@@ -100,8 +100,24 @@ public final class CompanionSpawner {
 			// than a frame of untamed wolf that then changes.
 			configure.accept(entity);
 
-			level.addFreshEntity(entity);
+			boolean added = level.addFreshEntity(entity);
 			spawned.add(entity.getUUID().toString());
+
+			// Logged at INFO, and logged on SUCCESS rather than only on failure. Until
+			// now this method said nothing at all when it worked, so "the companions did
+			// not appear" and "the companions appeared eight blocks below the ledge you
+			// were standing on" produced identical evidence -- which is CLAUDE.md 1g
+			// ("a tuned number never compared against what shipped is a number nobody is
+			// checking") in its purest form. dy is called out separately because
+			// SafeSpawn measures companion bands HORIZONTALLY and may move a candidate
+			// up to VERTICAL_SEARCH = 8 blocks vertically, so a placement can be well
+			// inside its band and still be out of sight over an edge.
+			EntropyMod.LOGGER.info(
+					"Companions: placed {} at {} -- {} blocks horizontally, dy {}, added={}",
+					type.toShortString(), found.pos(),
+					String.format("%.1f", Math.sqrt(SafeSpawn.horizontalDistanceSqr(
+							found.pos().getX(), found.pos().getZ(), player.getX(), player.getZ()))),
+					found.pos().getY() - player.blockPosition().getY(), added);
 		}
 
 		if (spawned.size() < count) {

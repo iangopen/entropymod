@@ -173,8 +173,113 @@ public final class CompanionMotion {
 	}
 
 	// ==================================================================
-	// Gather (respawn / rejoin / dimension change)
+	// Gather (respawn / rejoin / dimension change / TELEPORT)
 	// ==================================================================
+
+	/**
+	 * Single-tick movement that can only be a teleport.
+	 *
+	 * <p>Sixteen blocks, the same number and the same reasoning as
+	 * {@code TramplePath.MAX_SEGMENT}: no legitimate vanilla motion covers it in one
+	 * tick. The fastest sustained travel in the game is elytra-with-rockets at roughly
+	 * two blocks per tick, and a boat on ice or a sprinting horse are well under one.
+	 * Sixteen is therefore not a tuned threshold -- it is a gap between what movement
+	 * can produce and what only a discontinuity can.
+	 *
+	 * <p>A false positive would be harmless anyway: {@link #shouldGather} is re-asked
+	 * per companion, so anything already within {@link #CATCH_UP_DISTANCE} is left
+	 * alone. The cost of being wrong is one bounded position search, not a teleport.
+	 */
+	public static final double TELEPORT_DELTA = 16.0;
+
+	/**
+	 * Detects the discontinuities <b>no event reports</b>.
+	 *
+	 * <h2>The bug this exists for: a correct recovery nothing ever invoked</h2>
+	 *
+	 * <p>{@code CompanionService.gather} was wired to {@code ServerPlayerEvents.JOIN},
+	 * {@code AFTER_RESPAWN} and {@code AFTER_PLAYER_CHANGE_LEVEL} -- and every one of
+	 * those is a <em>different</em> event from an ordinary teleport. Verified in
+	 * {@code ServerPlayer.teleport(TeleportTransition)}'s bytecode: at offset 62 it
+	 * compares {@code transition.newLevel().dimension()} against the current
+	 * dimension, and when they are equal it takes the branch at offset 104 --
+	 * {@code connection.teleport(...)}, {@code resetPosition()}, return. The call to
+	 * {@code triggerDimensionChangeTriggers}, which is the <b>only</b> place Fabric
+	 * fires {@code AFTER_PLAYER_CHANGE_LEVEL} from, sits at offset 289, inside the
+	 * other branch.
+	 *
+	 * <p><b>So a {@code /tp} within one dimension, an ender pearl, a chorus fruit and
+	 * every command-driven move fire none of the three hooks</b>, and the companions
+	 * are simply left where they were. Confirmed against {@code run/logs/latest.log}:
+	 * four {@code /tp}s with The Audience held, and not one "Companion gather" line.
+	 *
+	 * <p><b>The recovery logic was never the problem</b> -- {@link #shouldGather} was
+	 * tested, and passed, and is still correct. What was untested is the only thing
+	 * that matters to a player: that something calls it. That is why this trigger is
+	 * a plain function over positions rather than another event subscription -- it is
+	 * driven by the harness in the same pass as the decision it feeds.
+	 */
+	public static final class TeleportWatch {
+
+		private final Map<String, double[]> lastPosition = new HashMap<>();
+		private final Map<String, String> lastLevel = new HashMap<>();
+
+		/**
+		 * Records one sample and reports whether the player just jumped.
+		 *
+		 * @param levelId the dimension the player is in now
+		 * @return true when this sample cannot be explained by movement
+		 */
+		public boolean sample(String playerId, String levelId, double x, double y, double z) {
+			double[] previous = lastPosition.put(playerId, new double[] {x, y, z});
+			String previousLevel = lastLevel.put(playerId, levelId);
+			// First sighting: there is no previous position, so there is no jump to
+			// measure. Start the history rather than treating the missing sample as a
+			// discontinuity -- otherwise every login would gather twice.
+			if (previous == null || previousLevel == null) {
+				return false;
+			}
+			if (!previousLevel.equals(levelId)) {
+				return true;
+			}
+			double dx = x - previous[0];
+			double dy = y - previous[1];
+			double dz = z - previous[2];
+			return dx * dx + dy * dy + dz * dz > TELEPORT_DELTA * TELEPORT_DELTA;
+		}
+
+		/**
+		 * Re-baselines a player without reporting a jump. Called after any gather that
+		 * an <em>event</em> drove, so the position change it was reacting to is not then
+		 * reported a second time by this watcher on the next tick.
+		 */
+		public void rebase(String playerId, String levelId, double x, double y, double z) {
+			lastPosition.put(playerId, new double[] {x, y, z});
+			lastLevel.put(playerId, levelId);
+		}
+
+		/**
+		 * Drops everyone not in {@code live}.
+		 *
+		 * <p>Unconditional, exactly as {@code SpawnSchedule.tick} is and for the reason
+		 * the harness caught there: guarding on {@code size() > live.size()} leaves a
+		 * departed player's history behind forever whenever someone else joins in the
+		 * same pass.
+		 */
+		public void retain(java.util.Set<String> live) {
+			lastPosition.keySet().retainAll(live);
+			lastLevel.keySet().retainAll(live);
+		}
+
+		public void reset() {
+			lastPosition.clear();
+			lastLevel.clear();
+		}
+
+		public boolean isTracking(String playerId) {
+			return lastPosition.containsKey(playerId);
+		}
+	}
 
 	/**
 	 * Whether a companion should be pulled to its owner on a <em>discontinuity</em>
