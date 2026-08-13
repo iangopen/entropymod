@@ -37,8 +37,18 @@ import java.util.Map;
  * what prevents duplication; it exists so the run knows what it created.
  *
  * <p><b>The honest cost of that choice:</b> a companion that dies stays dead. For
- * Loyal Pack that is correct -- they are real wolves and mortal. For the three
- * invulnerable effects it cannot arise. Nothing re-summons, ever.
+ * Loyal Pack that is correct -- they are real wolves and mortal. For the <b>two</b>
+ * invulnerable effects (The Audience, whose registry description literally says
+ * "invincible", and the llama) it cannot arise. Nothing re-summons, ever.
+ *
+ * <p><b>The Entourage is deliberately NOT in that set any more</b>, and the reason is
+ * worth knowing before anyone "restores" it for consistency: {@code setInvulnerable}
+ * is not only a damage decision. It also drives
+ * {@code LivingEntity.canBeSeenAsEnemy}, which every combat
+ * {@code TargetingConditions} consults, so an invulnerable escort cannot be targeted
+ * by hostile mobs or retaliated against -- which deletes the half of that effect its
+ * own description promises. It relies on 500 max health instead, and its golems can
+ * die. See {@code TheEntourageBehavior}.
  *
  * <h2>Shape</h2>
  *

@@ -4175,23 +4175,40 @@ public final class HarnessMain {
 						com.entropymod.entropy.companion.CompanionService.class, "getUUID"),
 				"...and keys every roster lookup by UUID");
 
-		// --- ALIVE: invulnerability is actually set, not merely intended -----------
-		// The gap that shipped: the Audience and the llama set it, the Entourage did
-		// not, and the golems in the save read Invulnerable=0 at 94-97 of 100 HP.
-		check(Checks.classReferences(TheEntourageBehavior.class, "setInvulnerable"),
-				"REGRESSION: The Entourage sets setInvulnerable(true). It did not, which "
-						+ "made it the one companion invulnerable by CompanionRoster's "
-						+ "contract but mortal in fact");
-		for (String id : List.of(TheAudienceBehavior.ID, EmotionalSupportLlamaBehavior.ID,
-				TheEntourageBehavior.ID)) {
+		// --- invulnerability: TWO effects, and the Entourage is deliberately not one -
+		// This assertion used to require setInvulnerable on all THREE, and was green
+		// while the flag was silently making the escort untargetable. It now records
+		// which effects are invulnerable BY SPECIFICATION -- The Audience's registry
+		// description literally says "invincible" -- rather than treating the flag as
+		// a property every companion should converge on.
+		for (String id : List.of(TheAudienceBehavior.ID, EmotionalSupportLlamaBehavior.ID)) {
 			check(Checks.classReferences(EffectBehaviors.get(id).getClass(), "setInvulnerable"),
-					id + ": invulnerable on spawn -- all three of the contract's "
-							+ "'cannot arise' effects, checked together so one cannot drift "
-							+ "away from the other two again");
+					id + ": invulnerable on spawn -- its own description promises it, and "
+							+ "neither effect is a combatant, so losing targetability costs "
+							+ "it nothing");
 		}
 		check(!Checks.classReferences(LoyalPackBehavior.class, "setInvulnerable"),
-				"...and Loyal Pack is deliberately NOT invulnerable -- they are real, "
-						+ "mortal animals, which is the documented contrast");
+				"Loyal Pack is deliberately NOT invulnerable -- they are real, mortal "
+						+ "animals, which is the documented contrast");
+
+		// The one that has to stay gone. setInvulnerable is not only a damage decision:
+		// LivingEntity.canBeSeenAsEnemy() is !isInvulnerable() && canBeSeenByAnyone(),
+		// LivingEntity.canAttack ends in target.canBeSeenAsEnemy(), and every combat
+		// TargetingConditions (NearestAttackableTargetGoal, and HurtByTargetGoal too)
+		// returns false when canAttack does. So the flag made the golems untargetable
+		// by hostile mobs AND un-retaliatable-against -- deleting the half of the effect
+		// its own registry description promises.
+		check(!Checks.classReferences(TheEntourageBehavior.class, "setInvulnerable"),
+				"THE ENTOURAGE MUST NOT BE INVULNERABLE: the flag drives canBeSeenAsEnemy, "
+						+ "so an invulnerable escort cannot be targeted or retaliated "
+						+ "against, and 'attack anything that attacks you' becomes "
+						+ "unreachable");
+		check(Checks.classReferences(TheEntourageBehavior.class, "applyMaxHealth"),
+				"...and 500 max health is what replaces the guarantee -- which is also the "
+						+ "first session it has been reachable at all");
+		checkNear(constant(TheEntourageBehavior.class, "HEALTH_MULTIPLIER"), 5.0, 1e-9,
+				"the multiplier is unchanged at 5x (100 -> 500), so removing the flag is a "
+						+ "pure deletion rather than a retune riding along with it");
 
 		// --- TRACKED: the gather decision fires at the real post-respawn distance ---
 		int gathered = 0;

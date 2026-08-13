@@ -56,6 +56,33 @@ import java.util.List;
  * reproducing the class. Everything after the target choice -- pathing, swinging,
  * knockback, losing interest -- is the golem's own vanilla AI.
  *
+ * <h2>DO NOT ADD {@code setInvulnerable(true)} BACK. It is not a damage decision.</h2>
+ *
+ * <p>It was added, shipped for one session, and removed again. The damage half worked
+ * exactly as intended -- {@code Entity.isInvulnerableToBase} blocks everything except
+ * {@code #bypasses_invulnerability} ({@code out_of_world}, {@code generic_kill}) and a
+ * Creative-mode player. <b>The problem is the half that is not about damage at all:</b>
+ *
+ * <pre>
+ * LivingEntity.canBeSeenAsEnemy() = !isInvulnerable() &amp;&amp; canBeSeenByAnyone()
+ * LivingEntity.canAttack(target)  = ... : target.canBeSeenAsEnemy()   // Mob delegates
+ * TargetingConditions.test(...)   = if (isCombat &amp;&amp; !attacker.canAttack(target)) false
+ * </pre>
+ *
+ * <p>{@code NearestAttackableTargetGoal} uses {@code forCombat()}, and so does
+ * {@code HurtByTargetGoal} ({@code forCombat().ignoreLineOfSight()
+ * .ignoreInvisibilityTesting()}). So an invulnerable golem <b>cannot be acquired as a
+ * target by any hostile mob, and a mob it punches cannot retaliate.</b> Zombies walked
+ * past the escort to the player, the escort could never pull aggro, and this effect's
+ * own registry description -- "attack anything that attacks you" -- described something
+ * that could not happen. It also made {@link #HEALTH_MULTIPLIER} unreachable.
+ *
+ * <p><b>The honest cost of removing it, stated rather than buried:</b> the golems are
+ * genuinely killable now, by mobs and by the player, and {@code CompanionRoster}'s "a
+ * companion that dies stays dead" therefore <em>can</em> arise for this effect -- it is
+ * one of two invulnerable companions now, not three. {@link #HEALTH_MULTIPLIER} is the
+ * replacement for the guarantee, not an equal of it.
+ *
  * <p>See {@code CompanionRoster} for why {@code apply} is gated on
  * {@link EffectContext#isFreshPick()} rather than counting live entities.
  */
@@ -119,14 +146,17 @@ public final class TheEntourageBehavior implements EffectBehavior {
 	 * clamped away. {@code CompanionBuffs.applyMaxHealth} refills the bar, because
 	 * raising the ceiling does not raise current health.
 	 *
-	 * <p><b>Flagged rather than silently reconciled: the golems are also
-	 * {@code setInvulnerable(true)}</b>, which was added in the previous session to
-	 * honour {@code CompanionRoster}'s "a companion that dies stays dead" contract. So
-	 * 500 HP is presently unreachable in play -- it is insurance for the day
-	 * invulnerability is reconsidered, not a change the player can feel today. The
-	 * "+400%" reading is the one asked for (new total = 5x); the other candidate
-	 * reading, +400 flat, would give 500.0 as well by coincidence of the base being
-	 * 100, so no interpretation is at risk here.
+	 * <p><b>This is now the golems' actual survivability, and for one session it was
+	 * not.</b> It shipped alongside {@code setInvulnerable(true)} and was flagged then
+	 * as "presently unreachable" -- two changes that contradicted each other, which is
+	 * exactly what the flag's removal resolves. The "+400%" reading is the one asked
+	 * for (new total = 5x); the other candidate reading, +400 flat, would give 500.0 as
+	 * well by coincidence of the base being 100, so no interpretation is at risk.
+	 *
+	 * <p>For scale, against what Tier 2 actually throws: a creeper's point-blank blast
+	 * is ~40 damage and a zombie's hit 3-4, so a golem absorbs a dozen explosions or
+	 * well over a hundred zombie hits. It is not immortal, and that is the trade named
+	 * below.
 	 */
 	public static final double HEALTH_MULTIPLIER = 5.0;
 
@@ -142,15 +172,10 @@ public final class TheEntourageBehavior implements EffectBehavior {
 					// it ever turning on villagers or wandering off to defend a village
 					// instead of its owner.
 					golem.setPlayerCreated(true);
-					// THE LINE THAT WAS MISSING. CompanionRoster's contract is that a
-					// companion which dies stays dead -- nothing ever re-summons -- and
-					// that is only acceptable for this effect because it is one of the
-					// three that "cannot arise". Without this the golems were the one
-					// invulnerable-by-contract companion that was in fact mortal, and a
-					// dead escort was gone for the rest of the run with no way back.
-					// Confirmed from a world save: shipped golems read Invulnerable=0 and
-					// were already down to 94-97 of 100 HP.
-					golem.setInvulnerable(true);
+					// NO setInvulnerable HERE, AND THAT IS THE POINT -- see the class
+					// javadoc. It made the golems untargetable by every hostile mob and
+					// unable to be retaliated against, which deleted the half of this
+					// effect its own description promises. 500 HP is the replacement.
 					// PERMANENT modifiers, not transient: this apply() runs once and
 					// never again (isFreshPick), so a transient modifier would vanish
 					// on the first chunk unload with nothing to re-derive it from.

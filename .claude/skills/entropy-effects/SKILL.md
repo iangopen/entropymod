@@ -3914,3 +3914,85 @@ comfortably inside its 2–6 band and still be out of sight over an edge. It als
 It is **`ResourceKey.identifier()`** in this mapping (alongside `registry()` and
 `registryKey()`). Every tutorial writes `level.dimension().location()`; it fails to
 compile here.
+
+---
+
+### 1s. `setInvulnerable` IS NOT ONLY A DAMAGE DECISION — it also deletes targetability
+**Supersedes the two entries above that call the Entourage one of "the three
+invulnerable effects" and that record adding `setInvulnerable(true)` as a fix.** The
+flag was added, shipped for one session, and has now been removed. It is **two** now:
+The Audience (whose registry description literally says "invincible") and the llama.
+
+**The damage half was exactly as designed and is worth having written down**, because
+it is smaller than "everything". `Entity.isInvulnerableToBase(DamageSource)` is:
+
+```java
+isRemoved()
+ || (this.invulnerable && !src.is(#bypasses_invulnerability) && !src.isCreativePlayer())
+ || (src.is(#is_fire) && fireImmune())
+ || (src.is(#is_fall) && this.is(#fall_damage_immune))
+```
+
+`LivingEntity.isInvulnerableTo` is that `|| EnchantmentHelper.isImmuneToDamage(...)`,
+and it is the **first statement of `hurtServer`** (`ifeq 11; iconst_0; ireturn`), so
+nothing downstream runs. The shipped tag is exactly two entries —
+`minecraft:out_of_world` and `minecraft:generic_kill` — and `isCreativePlayer()` is
+`getEntity() instanceof Player p && p.getAbilities().instabuild`.
+
+> **So an invulnerable entity can be hurt by exactly three things: the void, `/kill`,
+> and a Creative-mode player.** Survival player attacks, every mob attack, lava, fire,
+> explosions, drowning, suffocation, cactus, magic, wither, fall, freezing and
+> starvation are all blocked, and `PiercingWeapon.canHitEntity` short-circuits on
+> `isInvulnerable()` so a mace does not even register a hit. No class from
+> `LivingEntity` down to `IronGolem` overrides `isInvulnerableTo`.
+
+**The half nobody chose, and the reason the flag had to go:**
+
+```
+LivingEntity.canBeSeenAsEnemy() = !isInvulnerable() && canBeSeenByAnyone()
+LivingEntity.canAttack(target)  = (target instanceof Player && PEACEFUL) ? false
+                                                             : target.canBeSeenAsEnemy()
+Mob.canAttack(target)           = !target.is(GHAST) && super.canAttack(target)
+TargetingConditions.test(...)   = if (isCombat && (!attacker.canAttack(target)
+                                                   || attacker.isAlliedTo(target))) false
+```
+
+`NearestAttackableTargetGoal` uses `forCombat()`, and **so does `HurtByTargetGoal`**
+(`forCombat().ignoreLineOfSight().ignoreInvisibilityTesting()`). Therefore an
+invulnerable escort **cannot be acquired as a target by any hostile mob, and a mob it
+punches cannot retaliate.** Zombies walked past the Entourage to the player, the
+golems could never pull aggro, and the effect's own registry description — *"Four iron
+golems escort you and attack anything that attacks you"* — described something that
+could not occur. It also made the 500 max health from the buff session **unreachable**,
+which that session's own javadoc flagged as "presently unreachable behind
+`setInvulnerable`" without noticing the two changes contradicted each other.
+
+**Note the `canBeSeenAsEnemy` check inside `TargetingConditions.test` at offset 50 is
+NOT the one that matters, and reading only that would exonerate the flag.** That branch
+is behind `if (attacker != null) goto 69`, so it serves only the null-attacker form
+(`getNearestPlayer`-style queries). The path that kills ordinary mob targeting is
+offset 76's `attacker.canAttack(target)`, which reaches `canBeSeenAsEnemy` one call
+deeper. **Trace the consumer chain, not the first occurrence of the name** — failure
+mode 2 in its "I found *a* use of the value" form.
+
+**The rule that generalises past this effect:** `setInvulnerable(true)` on anything
+that is supposed to *participate in combat* is wrong, however convenient the damage
+immunity is. It is not a damage modifier — it is a declaration that the entity is not
+a combatant, and vanilla's targeting reads it that way. For a companion that should
+survive rather than be ignored, **raise `MAX_HEALTH` instead**: at 500 HP an iron
+golem absorbs roughly a dozen point-blank creeper blasts (~40 each) or well over a
+hundred zombie hits (3-4 each), while staying a legal target.
+
+**Honest cost, stated rather than buried:** the Entourage's golems are genuinely
+killable now — by mobs and by the player — so `CompanionRoster`'s "a companion that
+dies stays dead" *can* arise for this effect. Health is a replacement for the
+guarantee, not an equal of it.
+
+**And the harness was green on it, for the third time in this class.** The shipped
+assertion required `setInvulnerable` on all three companions, with the message
+*"all three of the contract's 'cannot arise' effects, checked together so one cannot
+drift away from the other two again"* — an assertion that a property be **uniform**,
+written before anyone asked whether the property was right for each effect. It now
+records which effects are invulnerable *by specification* and asserts the Entourage's
+flag stays **absent**, with the `canBeSeenAsEnemy` chain named in the failure message
+so the next session cannot re-add it for consistency.
