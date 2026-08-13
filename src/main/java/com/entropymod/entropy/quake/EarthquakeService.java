@@ -6,10 +6,13 @@ import com.entropymod.entropy.EntropyDamageTypes;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.spawn.SpawnSchedule;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.level.block.LevelEvent;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,8 +22,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Earthquake's tick service: a random-interval tremor of Slowness II plus two
- * half-heart hits of true damage.
+ * Earthquake's tick service: a random-interval tremor of Slowness III, a two-second
+ * blindness, two half-heart hits of true damage, and nine bursts of ground dust.
  *
  * <p>Third shape alongside attribute and mixin, exactly like {@code GreenThumbGrowth}
  * and the two spawn effects -- the mechanic is a schedule of ours rather than a value
@@ -116,6 +119,12 @@ public final class EarthquakeService {
 		// are slow.
 		player.addEffect(new MobEffectInstance(MobEffects.SLOWNESS,
 				EarthquakeBehavior.TREMOR_TICKS, EarthquakeBehavior.SLOWNESS_AMPLIFIER));
+		// Blindness for HALF the window, granted once here rather than re-applied per
+		// tick. Its own duration is what drives the client's fog lerp -- refreshing it
+		// every tick would pin the remaining duration at 40 and delete the 20-tick
+		// ease-out that makes it read as recovering rather than as switching off.
+		player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS,
+				EarthquakeBehavior.BLINDNESS_TICKS, EarthquakeBehavior.BLINDNESS_AMPLIFIER));
 		ACTIVE.put(id, 0);
 		// Tick 0 is a damage tick, so the opening hit lands on the same tick the
 		// Slowness does -- see EarthquakeBehavior.DAMAGE_TICKS for why the hits bracket
@@ -134,6 +143,9 @@ public final class EarthquakeService {
 	}
 
 	private static void applyTick(ServerPlayer player, int elapsed) {
+		if (EarthquakeBehavior.isParticleTick(elapsed)) {
+			shatterGround(player, EarthquakeBehavior.particleCountFor(elapsed));
+		}
 		if (!EarthquakeBehavior.isDamageTick(elapsed)) {
 			return;
 		}
@@ -146,5 +158,60 @@ public final class EarthquakeService {
 		EntropyMod.LOGGER.debug("Earthquake: tremor hit {} of {} on {} at t+{}",
 				elapsed == 0 ? 1 : 2, EarthquakeBehavior.DAMAGE_TICKS.length,
 				player.getName().getString(), elapsed);
+	}
+
+	/**
+	 * One burst of ground dust under the player.
+	 *
+	 * <h2>DUST_PILLAR is vanilla's own "the ground was smashed" particle</h2>
+	 *
+	 * <p>{@code ParticleTypes.DUST_PILLAR} is referenced by exactly one thing in the
+	 * whole game: {@code ParticleUtils.spawnSmashAttackParticles}, i.e. <b>the mace's
+	 * smash attack</b>. So this is not a particle chosen because its name sounded
+	 * right -- it is the effect the game already uses for an impact shattering the
+	 * ground, reused rather than approximated.
+	 *
+	 * <p>It is a {@code BlockParticleOption}, and
+	 * {@code spawnSmashAttackParticles} reads {@code level.getBlockState(pos)}
+	 * <em>itself</em>, so <b>the dust is textured from the real terrain</b>: grass throws
+	 * grass, stone throws stone, sand throws sand, deepslate throws deepslate. Same
+	 * data-driven reuse as Blight Touched taking a destroyed crop's own break particles
+	 * from {@code PARTICLES_DESTROY_BLOCK}, and the reason this reads as <em>this
+	 * ground</em> shattering rather than as a generic grey puff.
+	 *
+	 * <p>Dispatched through {@code LevelEvent.PARTICLES_SMASH_ATTACK} (2013) rather than
+	 * {@code sendParticles}, which is the cheaper of the two by a wide margin: the level
+	 * event is <b>one small packet</b> (id, {@code BlockPos}, int) broadcast to tracking
+	 * clients, and the eleven-odd particles per point of intensity are then generated
+	 * client-side. {@code sendParticles} would build and send a packet describing the
+	 * burst instead.
+	 *
+	 * <h2>Cost, stated for completeness</h2>
+	 *
+	 * <p>Nine bursts per tremor, one tremor per 45-180 seconds per player: <b>at worst
+	 * 0.2 packets per second per Earthquake holder</b>, plus one block-state read per
+	 * burst. There is no shared or global structure here -- every burst is keyed to one
+	 * player's own ground position and dispatched immediately -- so N players holding
+	 * the effect cost exactly N times a very small number rather than compounding.
+	 * (Singleplayer-scoped project, so N is 1 in practice; noted because "could this
+	 * compound" is a fair question of anything that emits per tick.)
+	 *
+	 * <p>{@code getBlockPosBelowThatAffectsMyMovement()} is vanilla's own "which block
+	 * am I standing on" -- the one that already answers it for step sounds and soul-sand
+	 * speed -- rather than a hand-rolled {@code blockPosition().below()}, which is wrong
+	 * on slabs, stairs and fences.
+	 *
+	 * <p>An air block below means there is no ground to shatter (flying, swimming,
+	 * mid-jump over a gap), and the burst is skipped rather than dispatched to render
+	 * nothing: a packet that produces invisible particles is the same kind of silent
+	 * no-op as a log line that does not say why.
+	 */
+	private static void shatterGround(ServerPlayer player, int intensity) {
+		ServerLevel level = player.level();
+		BlockPos ground = player.getBlockPosBelowThatAffectsMyMovement();
+		if (level.getBlockState(ground).isAir()) {
+			return;
+		}
+		level.levelEvent(LevelEvent.PARTICLES_SMASH_ATTACK, ground, intensity);
 	}
 }

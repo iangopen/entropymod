@@ -4216,3 +4216,138 @@ Gauntlets: there is no principled definition of "weapon" available at that point
 are data-driven, there is no `SwordItem` hierarchy), and "whatever you are holding" is
 legible where "whatever the game considers a weapon" is not. **An empty hand rolls
 nothing and consumes nothing**, which makes bare-handed combat a complete counterplay.
+
+---
+
+### Earthquake's tremor retune — Slowness III, blindness, and the dust
+The 80-tick window and the tick-0/tick-80 damage timing are **unchanged**; everything
+below happens *inside* the existing window. Three findings, and one of them corrects a
+rule this project keeps applying by analogy.
+
+#### 1z. THE SQUARED SPEED RULE IS A MOB RULE. It does not apply to players.
+Findings 1e and 1l record that real speed goes as the **square** of `MOVEMENT_SPEED`,
+and 1l turns that into the `sqrt(m)` tuning rule for companion buffs. **Both are about
+mobs, and applying either to a player effect is wrong by nearly half.**
+
+The reason is the one 1e already gives, read the other way: `Mob.setSpeed(f)` also calls
+`setZza(f)`, so a mob's forward *input* is its speed value and `moveRelative` multiplies
+the two. **A player's forward input comes from `ClientInput` as a normalised 1.0**, so
+player ground speed is **linear** in the attribute and the attribute multiplier *is* the
+speed multiplier. Phoenix Chambered Heart's Speed III note already says this
+("Ground speed is *linear* in the attribute"); it is restated here because the two
+statements sit in different sections and the mob one is the more memorable.
+
+Slowness is registered `MOVEMENT_SPEED`, **-0.15000000596046448**,
+`ADD_MULTIPLIED_TOTAL`, scaled by `amplifier + 1`:
+
+| | modifier | speed x | walking | sprinting |
+|---|---|---|---|---|
+| none | — | 1.00 | 4.3172 b/s | 5.6123 b/s |
+| Slowness II *(was)* | -0.30 | 0.70 | 3.0220 | 3.9286 |
+| **Slowness III** | **-0.45** | **0.55** | **2.3745** | **3.0868** |
+
+Squaring would have predicted **0.3025x**. The harness asserts the wrong model
+explicitly, with the gap named, so it cannot be reintroduced by analogy later.
+
+**Why III rather than II is a threshold, not a preference: 2.75 b/s.** That is a
+creeper's real chasing speed — attribute 0.25, and *there* the squared rule does apply
+(`0.25² / 0.454 × 20`). Under Slowness II a walking player manages 3.02 b/s and still
+pulls away from one; under Slowness III they manage 2.3745 and **no longer can**.
+III is precisely the point where walking stops being an escape and sprinting becomes
+mandatory.
+
+#### 1aa. BLINDNESS HAS A ~20-TICK FADE-OUT AND NO FADE-IN — so "brief" has a floor
+`BlindnessFogEnvironment.setupFog`, javap-verified:
+
+```java
+float f = instance.isInfiniteDuration() ? 5.0f
+        : Mth.lerp(Math.min(1.0f, instance.getDuration() / 20.0f), renderDistance, 5.0f);
+fogData.environmentalStart = f * 0.25f;
+fogData.environmentalEnd   = f;
+fogData.skyEnd = fogData.cloudEnd = f * 0.8f;
+```
+
+and `getModifiedDarkness` does the same against `endsWithin(19)`. **The lerp factor is
+driven by REMAINING duration**, so blindness snaps to full strength instantly and eases
+back out over its final 20 ticks.
+
+> **The consequence: a blindness of 20 ticks or fewer is entirely fade-out.** It starts
+> at factor `duration/20 < 1` and decays from there, so it *never reaches full darkness*.
+> A 10-tick grant peaks at half strength and reads as a flicker. The shortest grant that
+> reaches full strength at all is **21 ticks**.
+
+So "brief" cannot mean a handful of ticks here — below the fade window it stops being
+brief and becomes merely **weak**, which is the perceptual-threshold failure this project
+has hit four times. **40 ticks ships**: 20 at full darkness, then the 20-tick ease-out.
+It is the smallest value that is unambiguously the effect rather than the fade.
+
+**It starts at tick 0, and the end time is the real decision.** Beginning it with the
+tremor puts it on the same tick as the opening half-heart, so the blindness *explains*
+the hit. Ending it at 40 — the halfway point — leaves **two full seconds of restored
+vision before the closing hit at tick 80**, so the second half-heart is one the player
+can see coming and position for. Blinding the whole window would make both hits
+unavoidable and quietly cost this effect its `counterplay = true`, which the harness
+re-asserts alongside the timing. Offsetting the *start* was rejected: blindness arriving
+mid-tremor with no triggering event reads as a bug rather than as a tremor.
+
+Amplifier is 0 and could not be otherwise — Blindness is a bare
+`MobEffect(HARMFUL, ...)` with no `addAttributeModifier`, already established and
+asserted at amplifiers 0-9 under Phoenix Chambered Heart.
+
+#### 1ab. DUST_PILLAR is vanilla's own "the ground was smashed" particle
+The particle survey, rather than assuming one exists. Real candidates in this version:
+`BLOCK`, `BLOCK_CRUMBLE`, `DUST_PILLAR`, `DUST_PLUME`, `FALLING_DUST`, `ASH`,
+`WHITE_ASH`, `GUST` / `GUST_EMITTER_SMALL` / `GUST_EMITTER_LARGE`, `EXPLOSION`,
+`EXPLOSION_EMITTER`, `SMOKE` / `LARGE_SMOKE` / `WHITE_SMOKE`, `SCULK_CHARGE_POP`,
+`SONIC_BOOM`.
+
+**`DUST_PILLAR` is referenced by exactly one thing in the entire game**:
+`ParticleUtils.spawnSmashAttackParticles` — the **mace's smash attack**. So it is not a
+particle picked because the name sounded right; it is the effect the game already uses
+for an impact shattering the ground. (`BLOCK_CRUMBLE`'s only user is the Creaking, and
+the gust family is white swirl, wrong on both colour and read.)
+
+It is a `BlockParticleOption`, and `spawnSmashAttackParticles` calls
+`level.getBlockState(pos)` **itself**, so the dust is textured from the real terrain —
+grass throws grass, stone stone, sand sand, deepslate deepslate. Same data-driven reuse
+as Blight Touched taking a destroyed crop's own break particles, and the reason it reads
+as *this ground* shattering rather than a generic grey puff.
+
+**Dispatch is `LevelEvent.PARTICLES_SMASH_ATTACK` (2013), not `sendParticles`.** The
+level event is **one small packet** (id, `BlockPos`, int) broadcast to tracking clients,
+with the ~11 particles per point of intensity generated client-side; `sendParticles`
+would build and send a description of the burst instead. Same one-line shape as Blight
+Touched's `PARTICLES_DESTROY_BLOCK`.
+
+**Cadence: every 10 ticks — nine bursts across the window**, heavier (5 vs 2) on the two
+damage ticks. One burst at tick 0 would be an impact rather than a tremor and would be
+over while the player was still slowed; per-tick would be 80 packets and a fog bank. The
+heavier bursts on the damage ticks give the tremor a legible shape — big, small small
+small, big — matching what the damage is doing, instead of uniform noise.
+
+**Cost, stated because "could this compound" is fair of anything emitting per tick:**
+at the *shortest* interval that is **0.2 packets/second per holder** (9 bursts per 45 s),
+plus one block-state read per burst. Every burst is keyed to one player's own ground
+position and dispatched immediately — there is no shared or global structure — so N
+holders cost exactly N times a very small number. (Singleplayer-scoped project, so N is
+1 in practice.)
+
+Sited with **`getBlockPosBelowThatAffectsMyMovement()`**, vanilla's own "which block am I
+standing on" — the one that already answers it for step sounds and soul-sand speed —
+rather than `blockPosition().below()`, which is wrong on slabs, stairs and fences. Air
+below means no ground to shatter (flying, swimming, mid-jump over a gap) and the burst is
+**skipped**: a packet that renders nothing is the same silent no-op as a log line that
+does not say why.
+
+**Granted once, not refreshed.** The blindness is applied at `beginTremor` and never
+re-applied — its *remaining* duration is what drives the client fog lerp, so refreshing
+it every tick would pin the remaining duration at 40 and delete the ease-out entirely.
+That is a general rule for any effect whose client rendering reads `getDuration()`.
+
+#### Harness note: an inlined `static final int` cannot be asserted by name
+The first draft asserted `classReferences(EarthquakeService, "PARTICLES_SMASH_ATTACK")`
+and failed. `LevelEvent.PARTICLES_SMASH_ATTACK` is a `static final int`, so **javac
+inlines it at the call site and no reference to the name survives in the constant
+pool** — the same inlining trap `Checks.hasConstant` exists for on the mod's own side,
+reached from the vanilla direction. What is checkable is the *dispatch method*
+(`levelEvent`, a UTF8 method entry) plus the vanilla constant's value read by reflection.

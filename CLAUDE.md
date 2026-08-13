@@ -314,6 +314,13 @@ number. Vanilla's only true-damage precedent is **sonic boom, not the void**:
 Protection. And `LivingEntity.INVULNERABLE_DURATION` puts a **10-tick floor** under any
 effect that promises two hits — closer than that and the second is discarded silently.
 
+**1z. The squared speed rule (1e/1l) is a MOB rule — it does NOT apply to players.**
+A mob's forward input is its own speed value (`Mob.setSpeed` also calls `setZza`); a
+player's comes from `ClientInput` as a normalised 1.0, so player ground speed is
+**linear** in `MOVEMENT_SPEED`. Applying the square to a player effect is wrong by
+nearly half. See `entropy-effects` for that, for Blindness's 20-tick fade floor, and
+for `DUST_PILLAR` as vanilla's own ground-shatter particle.
+
 **1i. `moveTo(Entity, speed)` has NO stop distance -- it paths to the target's own
 block.** It is `createPath(entity, 1)`, so a "follow when further than 6" loop still
 delivers the follower to within a block of you; the threshold gates only *when a

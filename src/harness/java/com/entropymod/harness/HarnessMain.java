@@ -3032,6 +3032,24 @@ public final class HarnessMain {
 				"and leaving it out of BOTH registries keeps the id tables consistent");
 	}
 
+	/** Vanilla's PARTICLES_SMASH_ATTACK id, read by reflection (the field is inlined at call sites). */
+	private static int vanillaLevelEventSmashAttack() {
+		try {
+			var f = net.minecraft.world.level.block.LevelEvent.class
+					.getDeclaredField("PARTICLES_SMASH_ATTACK");
+			f.setAccessible(true);
+			return f.getInt(null);
+		} catch (Exception e) {
+			return -1;
+		}
+	}
+
+	/** Whether Earthquake still declares counterplay = true. */
+	private static boolean EarthquakeRegistryDefinitionCounterplay() {
+		EffectDefinition def = EffectRegistry.byId(EarthquakeBehavior.ID);
+		return def != null && def.counterplay();
+	}
+
 	/** Every copy of a classpath resource, in classloader order. Tag files merge, so there are several. */
 	private static List<String> allResources(String path) {
 		List<String> out = new ArrayList<>();
@@ -4641,8 +4659,162 @@ public final class HarnessMain {
 				"...tremor duration 80 ticks = 4 seconds");
 		checkNear(constant(EarthquakeBehavior.class, "TREMOR_DAMAGE"), 1.0, 1e-7,
 				"...and each hit is 1.0 damage, half a heart");
-		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 1,
-				"...Slowness amplifier 1 = displayed level II");
+		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 2,
+				"...Slowness amplifier 2 = displayed level III");
+
+		// --- SLOWNESS III: the real speed, and the rule that does NOT apply ---------
+		// Vanilla registers Slowness as MOVEMENT_SPEED, -0.15000000596046448,
+		// ADD_MULTIPLIED_TOTAL, scaled by (amplifier + 1) in AttributeTemplate.create.
+		double slownessPerLevel = 0.15000000596046448;
+		int amp = (int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER");
+		double speedMultiplier = 1.0 - slownessPerLevel * (amp + 1);
+		checkNear(speedMultiplier, 0.55, 1e-6,
+				"Slowness III multiplies MOVEMENT_SPEED by 0.55 -- a 45% reduction, against "
+						+ "Slowness II's 30%");
+		double walking = 4.3172;
+		double sprinting = 5.6123;
+		checkNear(walking * speedMultiplier, 2.3745, 1e-3,
+				"...so walking falls to 2.3745 b/s (from 4.3172)");
+		checkNear(sprinting * speedMultiplier, 3.0868, 1e-3,
+				"...and sprinting to 3.0868 b/s (from 5.6123)");
+
+		// PLAYER speed is LINEAR in the attribute. The squared rule is a MOB property
+		// (Mob.setSpeed also calls setZza, so a mob's forward input IS its speed value;
+		// a player's comes from ClientInput as a normalised 1.0). Asserting the wrong
+		// model explicitly so it cannot be applied here by analogy later.
+		double ifSquared = speedMultiplier * speedMultiplier;
+		check(Math.abs(ifSquared - speedMultiplier) > 0.2,
+				"THE SQUARED RULE IS A MOB RULE: applying CLAUDE.md 1e/1l here would predict "
+						+ String.format("%.4f", ifSquared) + "x instead of "
+						+ String.format("%.2f", speedMultiplier) + "x -- wrong by nearly half. "
+						+ "Player ground speed is LINEAR in MOVEMENT_SPEED, as recorded for "
+						+ "Phoenix Chambered Heart's Speed III");
+
+		// The threshold that justifies III over II: a creeper's real chasing speed.
+		// 2.70 b/s, and THERE the squared rule does apply (attribute 0.25 -> 0.25^2/0.454).
+		// b/s, not b/tick: the steady state is a/0.454 blocks per TICK, so x20.
+		double creeper = 0.25 * 0.25 / 0.454 * 20.0;
+		checkNear(creeper, 2.7533, 1e-2, "a creeper chases at ~2.70-2.75 b/s (squared rule)");
+		check(walking * (1.0 - slownessPerLevel * 2) > creeper,
+				"under the OLD Slowness II a walking player (3.02 b/s) still outpaced a "
+						+ "creeper -- the tremor was an inconvenience");
+		check(walking * speedMultiplier < creeper,
+				"under Slowness III they no longer can ("
+						+ String.format("%.2f", walking * speedMultiplier) + " < "
+						+ String.format("%.2f", creeper) + ") -- THIS is the threshold the "
+						+ "retune buys, and sprinting at 3.09 b/s is now the only escape");
+
+		// --- BLINDNESS: duration, timing, and the fade floor -----------------------
+		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_TICKS") == 40,
+				"Blindness lasts 40 ticks = 2 seconds");
+		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_AMPLIFIER") == 0,
+				"...at amplifier 0, which is the only meaningful value: Blindness is a bare "
+						+ "MobEffect with no attribute template, so nothing reads it");
+		int blind = (int) constant(EarthquakeBehavior.class, "BLINDNESS_TICKS");
+		check(blind < EarthquakeBehavior.TREMOR_TICKS,
+				"...and it is BRIEF -- shorter than the 80-tick tremor, as asked");
+		check(blind > 20,
+				"THE FADE FLOOR: BlindnessFogEnvironment lerps by min(1, REMAINING/20), so a "
+						+ "grant of 20 ticks or fewer is entirely fade-out and never reaches "
+						+ "full darkness. 'Brief' cannot mean a few ticks here -- below the "
+						+ "fade window it stops being brief and becomes merely weak");
+		check(blind == 40,
+				"...40 gives 20 ticks at full strength plus the 20-tick ease-out, which is "
+						+ "the smallest value that is unambiguously the effect and not the fade");
+
+		check(EarthquakeBehavior.isBlinded(0),
+				"blindness starts on tick 0, with the tremor and the first damage hit -- so "
+						+ "it is what explains the hit rather than arriving unprompted");
+		check(EarthquakeBehavior.isBlinded(blind - 1) && !EarthquakeBehavior.isBlinded(blind),
+				"...and has expired by tick " + blind + ", the halfway point");
+		check(!EarthquakeBehavior.isBlinded(EarthquakeBehavior.TREMOR_TICKS),
+				"CRITICAL FOR COUNTERPLAY: vision is restored a full 2 seconds before the "
+						+ "closing hit at tick 80, so the second half-heart is one the player "
+						+ "can see coming. Blinding the whole window would make both hits "
+						+ "unavoidable and quietly cost this effect its counterplay = true");
+		check(EarthquakeRegistryDefinitionCounterplay(),
+				"...and the registry still declares counterplay = true, which that timing is "
+						+ "what earns");
+
+		// --- PARTICLES: cadence, shape and bounded cost ----------------------------
+		check((int) constant(EarthquakeBehavior.class, "PARTICLE_INTERVAL") == 10,
+				"dust bursts every 10 ticks -- half a second");
+		int bursts = 0;
+		int hitBursts = 0;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (EarthquakeBehavior.isParticleTick(t)) {
+				bursts++;
+				if (EarthquakeBehavior.isDamageTick(t)) {
+					hitBursts++;
+				}
+			}
+		}
+		check(bursts == 9,
+				"...which is NINE bursts across the 4-second window (got " + bursts + ") -- "
+						+ "sustained shaking rather than a single instant burst, which is what "
+						+ "the brief asked to avoid, and far short of the 80 a per-tick emitter "
+						+ "would send");
+		check(hitBursts == 2,
+				"both damage ticks are also particle ticks, so the dust reinforces the hits");
+		check(EarthquakeBehavior.particleCountFor(0)
+						> EarthquakeBehavior.particleCountFor(EarthquakeBehavior.PARTICLE_INTERVAL),
+				"...and they are HEAVIER there ("
+						+ EarthquakeBehavior.particleCountFor(0) + " vs "
+						+ EarthquakeBehavior.particleCountFor(EarthquakeBehavior.PARTICLE_INTERVAL)
+						+ "), giving the tremor a shape -- big, small small small, big -- "
+						+ "instead of uniform noise");
+		check(!EarthquakeBehavior.isParticleTick(-1)
+						&& !EarthquakeBehavior.isParticleTick(EarthquakeBehavior.TREMOR_TICKS + 1),
+				"nothing is emitted outside the tremor window at either end");
+
+		// Cost. One levelEvent per burst is ONE small packet; the ~11 particles per point
+		// of intensity are generated client-side, so intensity is free on the wire.
+		double burstsPerSecond = bursts / (EarthquakeBehavior.MIN_INTERVAL_TICKS / 20.0);
+		check(burstsPerSecond < 0.25,
+				"COST: at the SHORTEST interval that is " + String.format("%.2f", burstsPerSecond)
+						+ " packets/second per holder (9 bursts per 45s) -- and each is one "
+						+ "levelEvent broadcast, not a per-particle payload");
+		// NOTE: the event ID cannot be asserted by name. LevelEvent.PARTICLES_SMASH_ATTACK
+		// is a static final int, so javac INLINES it at the call site and no reference to
+		// the name survives in the constant pool -- the same inlining trap Checks.hasConstant
+		// exists for. What is checkable is the dispatch method and the vanilla value itself.
+		check(Checks.classReferences(EarthquakeService.class, "levelEvent"),
+				"...because it dispatches through Level.levelEvent -- one broadcast packet, "
+						+ "with the ~11 particles per point of intensity generated client-side "
+						+ "by ParticleUtils.spawnSmashAttackParticles");
+		check(vanillaLevelEventSmashAttack() == 2013,
+				"...and vanilla's PARTICLES_SMASH_ATTACK is still 2013, the mace-smash event "
+						+ "whose only particle is DUST_PILLAR textured from the real block");
+		check(!Checks.classReferences(EarthquakeService.class, "sendParticles"),
+				"...rather than sendParticles, which would build and send a burst description "
+						+ "per emission");
+		check(Checks.classReferences(EarthquakeService.class,
+						"getBlockPosBelowThatAffectsMyMovement"),
+				"the burst is sited with vanilla's own 'which block am I standing on', the one "
+						+ "that already answers it for step sounds -- not blockPosition().below(), "
+						+ "which is wrong on slabs, stairs and fences");
+		check(Checks.classReferences(EarthquakeService.class, "isAir"),
+				"...and is skipped over air, so a burst never renders nothing while flying, "
+						+ "swimming or mid-jump");
+
+		// --- NO REGRESSION to the two things this retune must not touch -------------
+		int guardHits = 0;
+		int guardFirst = -1;
+		int guardLast = -1;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (EarthquakeBehavior.isDamageTick(t)) {
+				guardHits++;
+				if (guardFirst < 0) {
+					guardFirst = t;
+				}
+				guardLast = t;
+			}
+		}
+		check(EarthquakeBehavior.TREMOR_TICKS == 80 && guardHits == 2
+						&& guardFirst == 0 && guardLast == 80,
+				"REGRESSION GUARD: the retune changed nothing about the 80-tick window or the "
+						+ "tick-0/tick-80 damage timing -- both were confirmed correct and are "
+						+ "re-asserted here after the additions");
 
 		// The damage timing, and the vanilla constraint that sets its floor.
 		int damageTicks = 0;

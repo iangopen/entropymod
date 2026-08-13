@@ -217,7 +217,7 @@ public final class EffectRegistry {
 				"Damage you deal feeds you -- 8 damage restores a hunger shank, overflowing into saturation",
 				EffectCategory.SURVIVAL, EffectPhase.GOOD, 25, 50, true);
 		register("earthquake", "Earthquake",
-				"Every 45s-3min the ground shakes: Slowness II and two half-hearts of unblockable damage",
+				"Every 45s-3min the ground shakes: Slowness III, blindness and two half-hearts of unblockable damage",
 				EffectCategory.DEBUFF, EffectPhase.BAD, 25, 50, true);
 
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
