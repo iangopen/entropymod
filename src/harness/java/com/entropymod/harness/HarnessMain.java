@@ -3044,6 +3044,38 @@ public final class HarnessMain {
 		}
 	}
 
+	/**
+	 * How many particles {@code ParticleUtils.spawnSmashAttackParticles} actually emits
+	 * for a given {@code levelEvent} data value.
+	 *
+	 * <p>A transcription of the two loops in vanilla's client-side handler for event
+	 * 2013, javap-verified:
+	 *
+	 * <pre>
+	 * for (i = 0; i &lt; data / 3.0f;  i++)   // column at the player's feet
+	 * for (i = 0; i &lt; data / 1.5f;  i++)   // ring at radius 3.5
+	 * </pre>
+	 *
+	 * <p>This is the model whose absence let Earthquake ship an invisible effect: the
+	 * data int was treated as an abstract intensity dial when it is very nearly a
+	 * literal particle count. It is written out here rather than asserted as a bare
+	 * number so the relationship, not just the answer, is what the check pins.
+	 *
+	 * <p>Deliberately NOT calling the real method: it needs a {@code LevelAccessor} and
+	 * emits client-side particles. What is being checked is the arithmetic that turns a
+	 * shipped constant into a count on screen, and that is reproducible exactly.
+	 */
+	private static int smashAttackParticlesFor(int data) {
+		int emitted = 0;
+		for (int i = 0; i < data / 3.0f; i++) {
+			emitted++;
+		}
+		for (int i = 0; i < data / 1.5f; i++) {
+			emitted++;
+		}
+		return emitted;
+	}
+
 	/** Whether Earthquake still declares counterplay = true. */
 	private static boolean EarthquakeRegistryDefinitionCounterplay() {
 		EffectDefinition def = EffectRegistry.byId(EarthquakeBehavior.ID);
@@ -4659,24 +4691,28 @@ public final class HarnessMain {
 				"...tremor duration 80 ticks = 4 seconds");
 		checkNear(constant(EarthquakeBehavior.class, "TREMOR_DAMAGE"), 1.0, 1e-7,
 				"...and each hit is 1.0 damage, half a heart");
-		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 2,
-				"...Slowness amplifier 2 = displayed level III");
+		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 3,
+				"...Slowness amplifier 3 = displayed level IV");
 
-		// --- SLOWNESS III: the real speed, and the rule that does NOT apply ---------
+		// --- SLOWNESS IV: the real speed, and the rule that does NOT apply ----------
 		// Vanilla registers Slowness as MOVEMENT_SPEED, -0.15000000596046448,
 		// ADD_MULTIPLIED_TOTAL, scaled by (amplifier + 1) in AttributeTemplate.create.
 		double slownessPerLevel = 0.15000000596046448;
 		int amp = (int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER");
 		double speedMultiplier = 1.0 - slownessPerLevel * (amp + 1);
-		checkNear(speedMultiplier, 0.55, 1e-6,
-				"Slowness III multiplies MOVEMENT_SPEED by 0.55 -- a 45% reduction, against "
-						+ "Slowness II's 30%");
+		checkNear(speedMultiplier, 0.40, 1e-6,
+				"Slowness IV multiplies MOVEMENT_SPEED by 0.40 -- a 60% reduction, against "
+						+ "Slowness III's 45%");
 		double walking = 4.3172;
 		double sprinting = 5.6123;
-		checkNear(walking * speedMultiplier, 2.3745, 1e-3,
-				"...so walking falls to 2.3745 b/s (from 4.3172)");
-		checkNear(sprinting * speedMultiplier, 3.0868, 1e-3,
-				"...and sprinting to 3.0868 b/s (from 5.6123)");
+		checkNear(walking * speedMultiplier, 1.7269, 1e-3,
+				"...so walking falls to 1.7269 b/s (from 4.3172)");
+		checkNear(sprinting * speedMultiplier, 2.2449, 1e-3,
+				"...and sprinting to 2.2449 b/s (from 5.6123)");
+		check(speedMultiplier > 0.0,
+				"...and 0.40x is nowhere near the immobility clamp -- the modifier only "
+						+ "reaches -1.0 at amplifier 6, so there is headroom above this "
+						+ "and the value is a tuning choice rather than a limit");
 
 		// PLAYER speed is LINEAR in the attribute. The squared rule is a MOB property
 		// (Mob.setSpeed also calls setZza, so a mob's forward input IS its speed value;
@@ -4690,19 +4726,30 @@ public final class HarnessMain {
 						+ "Player ground speed is LINEAR in MOVEMENT_SPEED, as recorded for "
 						+ "Phoenix Chambered Heart's Speed III");
 
-		// The threshold that justifies III over II: a creeper's real chasing speed.
-		// 2.70 b/s, and THERE the squared rule does apply (attribute 0.25 -> 0.25^2/0.454).
-		// b/s, not b/tick: the steady state is a/0.454 blocks per TICK, so x20.
+		// The threshold, and it is the SAME creeper as the II->III step -- but the line
+		// IV crosses is the sprinting one, not the walking one. Creeper MOVEMENT_SPEED
+		// is 0.25, read out of Creeper.createAttributes rather than assumed, and THERE
+		// the squared rule does apply. b/s, not b/tick: steady state is a/0.454 blocks
+		// per TICK, so x20.
 		double creeper = 0.25 * 0.25 / 0.454 * 20.0;
 		checkNear(creeper, 2.7533, 1e-2, "a creeper chases at ~2.70-2.75 b/s (squared rule)");
-		check(walking * (1.0 - slownessPerLevel * 2) > creeper,
-				"under the OLD Slowness II a walking player (3.02 b/s) still outpaced a "
-						+ "creeper -- the tremor was an inconvenience");
-		check(walking * speedMultiplier < creeper,
-				"under Slowness III they no longer can ("
-						+ String.format("%.2f", walking * speedMultiplier) + " < "
-						+ String.format("%.2f", creeper) + ") -- THIS is the threshold the "
-						+ "retune buys, and sprinting at 3.09 b/s is now the only escape");
+		check(walking * (1.0 - slownessPerLevel * 3) < creeper,
+				"Slowness III had ALREADY put walking below a creeper (2.37 < 2.75) -- so "
+						+ "that line is not what the IV retune buys");
+		check(sprinting * (1.0 - slownessPerLevel * 3) > creeper,
+				"...but it left SPRINTING at 3.09 b/s, still comfortably clear, so the "
+						+ "tremor's answer was always the same one button");
+		check(sprinting * speedMultiplier < creeper,
+				"THE THRESHOLD IV BUYS: sprinting now falls to "
+						+ String.format("%.2f", sprinting * speedMultiplier) + " b/s, BELOW a "
+						+ "creeper's " + String.format("%.2f", creeper) + " -- under Slowness IV "
+						+ "there is no movement speed available to the player that outruns a "
+						+ "chasing creeper, so disengaging is not an option at all and the "
+						+ "answer has to be terrain, a block, or fighting");
+		check(walking * speedMultiplier < creeper / 1.5,
+				"...and walking at " + String.format("%.2f", walking * speedMultiplier)
+						+ " b/s is not merely slower than a creeper but well under two thirds "
+						+ "of its speed");
 
 		// --- BLINDNESS: duration, timing, and the fade floor -----------------------
 		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_TICKS") == 40,
@@ -4767,21 +4814,71 @@ public final class HarnessMain {
 						&& !EarthquakeBehavior.isParticleTick(EarthquakeBehavior.TREMOR_TICKS + 1),
 				"nothing is emitted outside the tremor window at either end");
 
-		// Cost. One levelEvent per burst is ONE small packet; the ~11 particles per point
-		// of intensity are generated client-side, so intensity is free on the wire.
+		// --- THE INVISIBLE-PARTICLE REGRESSION -------------------------------------
+		// Earthquake shipped with PARTICLE_COUNT = 2 and rendered nothing the player
+		// could see. Nothing was broken: the dispatch was right, the packet was
+		// broadcast, the client handled it. The data int was read as an abstract
+		// "intensity" dial when it is very nearly a literal particle count.
+		//
+		// ParticleUtils.spawnSmashAttackParticles, javap-verified, is two loops:
+		//     for (i = 0; i < data / 3.0f;  i++)   // column at the feet
+		//     for (i = 0; i < data / 1.5f;  i++)   // ring at radius 3.5
+		// so the emitted total is data/3 + data/1.5 == data.
+		int ordinary = EarthquakeBehavior.PARTICLE_COUNT;
+		int heavy = EarthquakeBehavior.PARTICLE_COUNT_ON_HIT;
+		check(smashAttackParticlesFor(2) == 3,
+				"THE BUG, RESTATED AS A NUMBER: the shipped intensity of 2 emitted "
+						+ smashAttackParticlesFor(2) + " particles -- one in the column and two "
+						+ "on a ring 3.5 BLOCKS AWAY, so exactly one was ever near the player, "
+						+ "for a few ticks, partly while they were blinded. Reported as "
+						+ "'particles never render', and that report was accurate");
+		check(smashAttackParticlesFor(5) == 6,
+				"...and the 'heavy' burst of 5 emitted " + smashAttackParticlesFor(5)
+						+ ", which is not a perceptual-threshold problem, it is nothing");
+		check(EarthquakeBehavior.VANILLA_MACE_SMASH_INTENSITY == 750,
+				"THE REFERENCE MAGNITUDE: vanilla's ONLY caller of event 2013, "
+						+ "MaceItem.knockback, passes 750 (sipush 750) -- the shipped 2 was "
+						+ "375x under the one number the game itself uses for this event");
+		check(ordinary >= 50,
+				"the ordinary burst is now " + ordinary + " (" + smashAttackParticlesFor(ordinary)
+						+ " particles: " + (ordinary / 3) + " in the column, " + (int) (ordinary / 1.5)
+						+ " on the ring) -- dense enough for the 3.5-block ring to close into a "
+						+ "ring rather than read as four stray specks");
+		check(heavy > ordinary,
+				"...the damage-tick burst is heavier still at " + heavy + " ("
+						+ smashAttackParticlesFor(heavy) + " particles), preserving the "
+						+ "big / small small small / big shape");
+		// The budget check: scaled against the game rather than against itself.
+		int tremorParticles = (bursts - hitBursts) * smashAttackParticlesFor(ordinary)
+				+ hitBursts * smashAttackParticlesFor(heavy);
+		check(tremorParticles <= EarthquakeBehavior.VANILLA_MACE_SMASH_INTENSITY,
+				"WHOLE-TREMOR BUDGET: " + tremorParticles + " particles across the 4-second "
+						+ "window, against the 750 a single mace smash emits in ONE frame -- so "
+						+ "a tremor is about one mace smash's worth of dust spread over its "
+						+ "window. Visible for the same reason vanilla's is, and no denser");
+		check(tremorParticles > 500,
+				"...and it is not timid either (" + tremorParticles + " > 500), which is the "
+						+ "half of this the first ship got wrong");
+
+		// Cost. One levelEvent per burst is ONE small packet; the particles are all
+		// generated client-side, so intensity is free on the wire -- which is exactly
+		// why the fix above costs nothing.
 		double burstsPerSecond = bursts / (EarthquakeBehavior.MIN_INTERVAL_TICKS / 20.0);
 		check(burstsPerSecond < 0.25,
 				"COST: at the SHORTEST interval that is " + String.format("%.2f", burstsPerSecond)
 						+ " packets/second per holder (9 bursts per 45s) -- and each is one "
-						+ "levelEvent broadcast, not a per-particle payload");
+						+ "levelEvent broadcast, not a per-particle payload, so raising the "
+						+ "intensity 30x added ZERO bytes to the wire");
 		// NOTE: the event ID cannot be asserted by name. LevelEvent.PARTICLES_SMASH_ATTACK
 		// is a static final int, so javac INLINES it at the call site and no reference to
 		// the name survives in the constant pool -- the same inlining trap Checks.hasConstant
 		// exists for. What is checkable is the dispatch method and the vanilla value itself.
 		check(Checks.classReferences(EarthquakeService.class, "levelEvent"),
 				"...because it dispatches through Level.levelEvent -- one broadcast packet, "
-						+ "with the ~11 particles per point of intensity generated client-side "
-						+ "by ParticleUtils.spawnSmashAttackParticles");
+						+ "with all ~1 particle PER POINT of intensity generated client-side by "
+						+ "ParticleUtils.spawnSmashAttackParticles. (This message used to say "
+						+ "'~11 per point'. That inverted reading is precisely what shipped the "
+						+ "invisible effect, so it is corrected here rather than deleted.)");
 		check(vanillaLevelEventSmashAttack() == 2013,
 				"...and vanilla's PARTICLES_SMASH_ATTACK is still 2013, the mace-smash event "
 						+ "whose only particle is DUST_PILLAR textured from the real block");
@@ -4796,6 +4893,102 @@ public final class HarnessMain {
 		check(Checks.classReferences(EarthquakeService.class, "isAir"),
 				"...and is skipped over air, so a burst never renders nothing while flying, "
 						+ "swimming or mid-jump");
+
+		// --- THE EXCLUDED-SOURCE TRAP ----------------------------------------------
+		// Not the cause of the invisible particles -- the 3-arg levelEvent overload is
+		// a default method that supplies null itself, so that call never had a source
+		// to get wrong. But adding the SOUND introduced a call that does take one, and
+		// this is the class of bug that is invisible to the build, invisible to a
+		// name-based reference check, and works perfectly for every player EXCEPT the
+		// one the effect is for.
+		//
+		// Both ServerLevel.levelEvent and ServerLevel.playSeededSound end in
+		// PlayerList.broadcast(Player except, ...), whose first statement is
+		// `if (player == except) continue`. Passing `player` there would structurally
+		// guarantee the affected player receives neither cue, forever.
+		check(Checks.methodPushesExplicitNull(EarthquakeService.class, "shatterGround"),
+				"THE BROADCAST REACHES THE AFFECTED PLAYER: shatterGround pushes an explicit "
+						+ "aconst_null (decoded as an instruction, not scanned as a byte) as the "
+						+ "EXCLUDED-player argument. PlayerList.broadcast skips `except`, and "
+						+ "nothing about a tremor is client-predicted, so passing the player "
+						+ "there -- the plausible-looking mistake -- would deliver the dust and "
+						+ "the sound to every bystander and never to the victim");
+		check(!Checks.classReferences(EarthquakeService.class,
+						"(Lnet/minecraft/world/entity/Entity;ILnet/minecraft/core/BlockPos;I)V"),
+				"...and the particle burst uses the 3-arg levelEvent overload, whose whole body "
+						+ "is `aconst_null` into the 4-arg one -- so that call cannot name a "
+						+ "source even by accident");
+
+		// --- SOUND: vanilla's own partner for event 2013, on the SAME cadence -------
+		check(Checks.classReferences(EarthquakeService.class, "MACE_SMASH_GROUND"),
+				"the cue is MACE_SMASH_GROUND -- not a name match but vanilla's OWN partner "
+						+ "for event 2013: MaceItem.knockback plays it and fires the particle "
+						+ "event on the same path, the same data-driven reuse as DUST_PILLAR");
+		check(Checks.classReferences(EarthquakeService.class, "MACE_SMASH_GROUND_HEAVY"),
+				"...and MACE_SMASH_GROUND_HEAVY on the damage ticks, which is vanilla's own "
+						+ "light/heavy split (it picks HEAVY above fallDistance 5.0) rather than "
+						+ "a second sound chosen separately");
+		check(Checks.classReferences(EarthquakeService.class, "BLOCKS"),
+				"...on SoundSource.BLOCKS, because this is the ground breaking and there is no "
+						+ "attacker -- the mace's getSoundSource() has no meaning here");
+
+		// CADENCE ALIGNMENT. The bug this guards is the sound and the dust drifting
+		// onto different schedules, which would read as an audio desync rather than as
+		// two settings being wrong. There is exactly ONE schedule: isParticleTick.
+		int soundBursts = 0;
+		int heavySounds = 0;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (!EarthquakeBehavior.isParticleTick(t)) {
+				continue;
+			}
+			soundBursts++;
+			boolean heavySound = EarthquakeBehavior.isHeavySoundTick(t);
+			boolean heavyDust = EarthquakeBehavior.particleCountFor(t)
+					== EarthquakeBehavior.PARTICLE_COUNT_ON_HIT;
+			if (heavySound != heavyDust) {
+				soundBursts = -1;
+				break;
+			}
+			if (heavySound) {
+				heavySounds++;
+			}
+		}
+		check(soundBursts == bursts,
+				"SOUND AND DUST SHARE ONE CADENCE: " + soundBursts + " sound bursts against "
+						+ bursts + " dust bursts, and on every single tick the two agree on "
+						+ "whether it is a heavy one -- because both read isDamageTick and the "
+						+ "service emits them from one call site");
+		check(heavySounds == hitBursts,
+				"...so both heavy samples land exactly on the two damage ticks (" + heavySounds
+						+ "), reinforcing the half-hearts rather than running under them");
+		check(constant(EarthquakeBehavior.class, "SOUND_VOLUME_ON_HIT")
+						> constant(EarthquakeBehavior.class, "SOUND_VOLUME"),
+				"...and the heavy burst is louder ("
+						+ constant(EarthquakeBehavior.class, "SOUND_VOLUME_ON_HIT") + " vs "
+						+ constant(EarthquakeBehavior.class, "SOUND_VOLUME")
+						+ "), matching the dust's big / small small small / big shape");
+		double pitch = constant(EarthquakeBehavior.class, "SOUND_PITCH");
+		check(pitch < 1.0,
+				"pitch is " + pitch + ", below 1.0 -- the sample plays slower and deeper, which "
+						+ "is what turns a weapon impact into a rumble");
+		check(pitch > 0.5,
+				"...and above the client mixer's 0.5 clamp with margin, rather than sitting on "
+						+ "the floor where a later nudge downward would silently do nothing");
+		check(constant(EarthquakeBehavior.class, "SOUND_VOLUME") < 1.0,
+				"the ordinary burst is quieter than vanilla's 1.0 mace, because this plays nine "
+						+ "times in four seconds where the mace plays once -- and a sub-1.0 "
+						+ "volume does NOT shrink the broadcast radius, since "
+						+ "SoundEvent.getRange(v) is `v > 1 ? 16*v : 16`");
+
+		// The tremor's timing is untouched by the Slowness IV retune. Restated here
+		// rather than assumed because "we made it worse" and "we made it longer" are
+		// the same change from the player's seat, and only one of them was asked for.
+		check(EarthquakeBehavior.TREMOR_TICKS == 80 && bursts == 9 && hitBursts == 2
+						&& EarthquakeBehavior.isBlinded(0) && !EarthquakeBehavior.isBlinded(40),
+				"SLOWNESS IV CHANGED NOTHING ELSE: the window is still 80 ticks, the hits still "
+						+ "bracket it at 0 and 80, the blindness still ends at the halfway point, "
+						+ "and there are still nine bursts -- the severity went up INSIDE the "
+						+ "window rather than by widening it, for the third retune running");
 
 		// --- NO REGRESSION to the two things this retune must not touch -------------
 		int guardHits = 0;

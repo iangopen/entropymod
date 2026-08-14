@@ -4219,10 +4219,17 @@ nothing and consumes nothing**, which makes bare-handed combat a complete counte
 
 ---
 
-### Earthquake's tremor retune — Slowness III, blindness, and the dust
-The 80-tick window and the tick-0/tick-80 damage timing are **unchanged**; everything
-below happens *inside* the existing window. Three findings, and one of them corrects a
-rule this project keeps applying by analogy.
+### Earthquake's tremor retune — Slowness IV, blindness, the dust and the sound
+The 80-tick window and the tick-0/tick-80 damage timing are **unchanged across every
+retune so far**; everything below happens *inside* the existing window. That is itself
+the pattern worth copying: when a curse needs to be more severe, raise the severity and
+leave the duration alone — a 60% penalty for four seconds is an interruption, the same
+penalty for ten is a punishment.
+
+Findings 1z–1ae. One corrects a rule this project keeps applying by analogy, and **two
+(1ac, 1ad) are flagged failure modes that generalise well beyond this effect** — both
+produce the symptom "the effect is invisible to the player it targets" with a completely
+green build.
 
 #### 1z. THE SQUARED SPEED RULE IS A MOB RULE. It does not apply to players.
 Findings 1e and 1l record that real speed goes as the **square** of `MOVEMENT_SPEED`,
@@ -4244,17 +4251,31 @@ Slowness is registered `MOVEMENT_SPEED`, **-0.15000000596046448**,
 |---|---|---|---|---|
 | none | — | 1.00 | 4.3172 b/s | 5.6123 b/s |
 | Slowness II *(was)* | -0.30 | 0.70 | 3.0220 | 3.9286 |
-| **Slowness III** | **-0.45** | **0.55** | **2.3745** | **3.0868** |
+| Slowness III *(was)* | -0.45 | 0.55 | 2.3745 | 3.0868 |
+| **Slowness IV** *(shipped)* | **-0.60** | **0.40** | **1.7269** | **2.2449** |
 
-Squaring would have predicted **0.3025x**. The harness asserts the wrong model
+Squaring would have predicted **0.16x** at IV. The harness asserts the wrong model
 explicitly, with the gap named, so it cannot be reintroduced by analogy later.
 
-**Why III rather than II is a threshold, not a preference: 2.75 b/s.** That is a
-creeper's real chasing speed — attribute 0.25, and *there* the squared rule does apply
-(`0.25² / 0.454 × 20`). Under Slowness II a walking player manages 3.02 b/s and still
-pulls away from one; under Slowness III they manage 2.3745 and **no longer can**.
-III is precisely the point where walking stops being an escape and sprinting becomes
-mandatory.
+**The threshold is 2.7533 b/s, and it is worth crossing TWICE.** That is a creeper's
+real chasing speed — `MOVEMENT_SPEED` 0.25, read out of `Creeper.createAttributes`
+rather than assumed, and *there* the squared rule does apply (`0.25² / 0.454 × 20`).
+
+| retune | what it took away |
+|---|---|
+| II → III | **walking** stops outrunning a creeper (3.02 → 2.37, past 2.75) |
+| III → **IV** | **sprinting** stops outrunning one too (3.09 → **2.24**, past 2.75) |
+
+This is the part worth remembering when tuning any severity dial: **III's own note said
+"sprinting becomes mandatory", which quietly meant the tremor's answer was always the
+same single button.** A curse whose counterplay is one keypress the player is probably
+already holding is not a tactical event. IV removes that answer without touching the
+window — under IV *no* movement speed available to the player outruns a chasing creeper,
+so disengaging is off the table and the response has to be terrain, a block, or fighting.
+
+0.40x is nowhere near a clamp; the modifier only reaches -1.0 (immobility) at
+amplifier 6. **Ask "which threshold does the next step cross" rather than "is the next
+step bigger"** — the second question always answers yes and tells you nothing.
 
 #### 1aa. BLINDNESS HAS A ~20-TICK FADE-OUT AND NO FADE-IN — so "brief" has a floor
 `BlindnessFogEnvironment.setupFog`, javap-verified:
@@ -4315,15 +4336,110 @@ as *this ground* shattering rather than a generic grey puff.
 
 **Dispatch is `LevelEvent.PARTICLES_SMASH_ATTACK` (2013), not `sendParticles`.** The
 level event is **one small packet** (id, `BlockPos`, int) broadcast to tracking clients,
-with the ~11 particles per point of intensity generated client-side; `sendParticles`
-would build and send a description of the burst instead. Same one-line shape as Blight
-Touched's `PARTICLES_DESTROY_BLOCK`.
+with the particles generated client-side; `sendParticles` would build and send a
+description of the burst instead. Same one-line shape as Blight Touched's
+`PARTICLES_DESTROY_BLOCK`.
 
-**Cadence: every 10 ticks — nine bursts across the window**, heavier (5 vs 2) on the two
-damage ticks. One burst at tick 0 would be an impact rather than a tremor and would be
-over while the player was still slowed; per-tick would be 80 packets and a fog bank. The
+**Cadence: every 10 ticks — nine bursts across the window**, heavier on the two damage
+ticks. One burst at tick 0 would be an impact rather than a tremor and would be over
+while the player was still slowed; per-tick would be 80 packets and a fog bank. The
 heavier bursts on the damage ticks give the tremor a legible shape — big, small small
 small, big — matching what the damage is doing, instead of uniform noise.
+
+#### 1ac. ⚑ A `levelEvent` DATA INT IS AN UNTYPED PER-EVENT ENCODING. Read the client's case AND vanilla's own magnitude.
+**Earthquake shipped this and rendered nothing the player could see.** It was reported as
+"particles never render", and that report was accurate. **Nothing was broken** — the
+dispatch was right, the packet was broadcast, the client handled the event. This is a
+sixth failure mode, distinct from the five in CLAUDE.md: not a mixin problem at all, and
+not a wrong *mechanic* — a **wrong magnitude in an argument with no type and no units**.
+
+`data` is an `int` whose meaning is defined only by the client's `switch` case for that
+id. For 2013 it is very nearly a **literal particle count**.
+`ParticleUtils.spawnSmashAttackParticles`, javap-verified, is two loops:
+
+```
+for (i = 0; i < data / 3.0f;  i++)   // column at the player's feet, gaussian/2 spread
+for (i = 0; i < data / 1.5f;  i++)   // ring at radius 3.5, angle = i RADIANS
+```
+
+`data/3 + data/1.5 == data`. So:
+
+| intensity | column | ring (3.5 blocks out) | total |
+|---|---|---|---|
+| shipped `PARTICLE_COUNT = 2` | 1 | 2 | **3** |
+| shipped `..._ON_HIT = 5` | 2 | 4 | **6** |
+| **vanilla `MaceItem.knockback`** | 250 | 500 | **750** |
+
+Three particles, of which the ring contributes two — and the ring sits **3.5 blocks
+away**, so exactly one particle per burst was ever near the player, for a few ticks,
+partly while they were blinded. Not the "below the perceptual threshold" failure mode 3
+describes: **nothing**.
+
+**The diagnostic is one grep, and it is the second half that matters.** Reading the
+client's case tells you the units; reading **the magnitude vanilla's own caller passes**
+tells you the scale, and only the second one would have caught this:
+
+```bash
+javap -p -c -cp <jar> net.minecraft.world.item.MaceItem | grep -B4 'levelEvent'
+#   sipush 2013 / getOnPos / sipush 750
+```
+
+**Shipped: 60 ordinary, 150 on the damage ticks** — 7×60 + 2×150 = **720 particles across
+four seconds, against the 750 a single mace smash emits in one frame.** That budget is
+the sanity check: a tremor is about one mace smash's worth of dust, spread over its
+window. Scaling it against the game rather than against itself is the whole point.
+
+**Cost of the fix: zero bytes.** Intensity is a single int in a packet whose particles
+are all generated client-side, so a 30x increase changes nothing on the wire — which is
+also why there was never a performance reason for the small number.
+
+**Generalises to:** any `levelEvent`/`gameEvent`/`entityEvent` data int, any
+`ClientboundLevelEventPacket` consumer. The value is opaque. Guessing a number because
+it "looks like an intensity" is guessing, and the build cannot tell you.
+
+#### 1ad. ⚑ `levelEvent` AND `playSound` TAKE A PLAYER TO **EXCLUDE**. For a self-targeted cue it must be `null`.
+**This was NOT Earthquake's bug** — it was the leading hypothesis, and refuting it took
+one `javap`. But it is a live trap for *any* future self-targeted visual or audio cue,
+it is invisible to the build, invisible to a name-based reference check, and its symptom
+is identical to the bug above: **the player the effect is for sees and hears nothing,
+while every bystander gets it perfectly.**
+
+Both broadcasts end in the same place:
+
+```
+ServerLevel.levelEvent(Entity except, int type, BlockPos pos, int data)
+ServerLevel.playSeededSound(Entity except, ...)      ← Level.playSound delegates here
+      └── PlayerList.broadcast(Player except, x, y, z, range, dim, packet)
+              └── offset 33:  if (player == except) continue;     ← javap-verified
+```
+
+The argument exists because vanilla's typical caller is an action the acting client
+**already predicted locally** — breaking a block, swinging a weapon — so re-sending it
+would double it up. **A mod effect on a server-side schedule has no client prediction
+whatsoever**, so the exclusion is never what you want.
+
+Two things that make this easy to get wrong and easy to get right:
+
+- **The 3-arg `levelEvent(int, BlockPos, int)` is safe by construction.** It is a
+  `LevelAccessor` *default method* whose entire body is `aconst_null` into the 4-arg
+  form. Prefer it; it cannot name a source even by accident.
+- **`playSound` has no such safe overload** — every overload's first parameter is the
+  nullable excluded entity. Pass `null` explicitly, as `MaceItem` does (`aconst_null`,
+  offset 123). Passing the affected player compiles, reads naturally ("play this sound
+  *for* the player"), and is exactly backwards.
+
+**Range is not a second trap here.** `SoundEvent.getRange(v)` is `v > 1 ? 16*v : 16`, so
+a deliberately quiet cue does **not** shrink the broadcast radius below 16 blocks — and
+the affected player is standing at the source.
+
+**Regression test — `Checks.methodPushesExplicitNull`.** `classReferences` cannot see
+this: the method name is identical either way, and so is the descriptor. The new helper
+parses the constant pool, extracts the named method's `Code` attribute, and **decodes
+instructions linearly** to find an `aconst_null` immediately followed by an `aload`.
+Decoding is the part that makes it real — `aconst_null` is opcode `0x01`, a byte that
+occurs constantly inside other instructions' operands, so a raw byte scan would pass on
+almost any method. It proves the method pushes an explicit null before a reference
+argument; keep such broadcast helpers small enough that there is only one candidate call.
 
 **Cost, stated because "could this compound" is fair of anything emitting per tick:**
 at the *shortest* interval that is **0.2 packets/second per holder** (9 bursts per 45 s),
@@ -4343,6 +4459,32 @@ does not say why.
 re-applied — its *remaining* duration is what drives the client fog lerp, so refreshing
 it every tick would pin the remaining duration at 40 and delete the ease-out entirely.
 That is a general rule for any effect whose client rendering reads `getDuration()`.
+
+#### 1ae. The sound: `MACE_SMASH_GROUND` / `_HEAVY` — vanilla's own partner for event 2013
+Sound was not part of the original build (only particles were asked for) and was added
+alongside the particle fix. Surveying all **1815** constants on `SoundEvents`, the real
+candidates for a ground impact are: `DECORATED_POT_SHATTER`, `GOAT_RAM_IMPACT`,
+`GOAT_SCREAMING_RAM_IMPACT`, `LIGHTNING_BOLT_IMPACT`, `WARDEN_ATTACK_IMPACT`,
+`MACE_SMASH_AIR`, `MACE_SMASH_GROUND`, `MACE_SMASH_GROUND_HEAVY`.
+
+**The mace pair wins for the same reason `DUST_PILLAR` did — it is not a name match, it
+is what vanilla already plays alongside this exact event.** `MaceItem.knockback`'s caller
+picks between `MACE_SMASH_GROUND` and `MACE_SMASH_GROUND_HEAVY` (on `fallDistance > 5.0`,
+offsets 110/116) and fires the 2013 particle event on the same path. So the audio and the
+visual here are vanilla's own matched pair rather than two things chosen separately. It
+also hands the light/heavy split the cadence already needed, for free.
+
+**Both cues come from one call site**, keyed on `isParticleTick`/`isDamageTick`, so there
+is exactly one notion of "this is a big tick" and the two can never drift into different
+cadences — an audio desync would read as a bug of a completely different kind.
+
+`SoundSource.BLOCKS`: this is the ground breaking and **there is no attacker**, so the
+mace's `entity.getSoundSource()` has no meaning here; BLOCKS also puts the cue on the
+slider someone would actually go looking for. Volume **0.6 / 1.0** (this plays nine times
+in four seconds where the mace plays once) and pitch **0.6** for both — below 1.0 the
+sample plays slower and deeper, which is what turns a weapon impact into a rumble, and
+0.6 sits above the client mixer's 0.5 clamp with margin rather than on the floor where a
+later nudge downward would silently do nothing.
 
 #### Harness note: an inlined `static final int` cannot be asserted by name
 The first draft asserted `classReferences(EarthquakeService, "PARTICLES_SMASH_ATTACK")`

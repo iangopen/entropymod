@@ -10,6 +10,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.level.block.LevelEvent;
@@ -22,8 +24,9 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Earthquake's tick service: a random-interval tremor of Slowness III, a two-second
- * blindness, two half-heart hits of true damage, and nine bursts of ground dust.
+ * Earthquake's tick service: a random-interval tremor of Slowness IV, a two-second
+ * blindness, two half-heart hits of true damage, and nine bursts of ground dust and
+ * shattering stone.
  *
  * <p>Third shape alongside attribute and mixin, exactly like {@code GreenThumbGrowth}
  * and the two spawn effects -- the mechanic is a schedule of ours rather than a value
@@ -144,7 +147,11 @@ public final class EarthquakeService {
 
 	private static void applyTick(ServerPlayer player, int elapsed) {
 		if (EarthquakeBehavior.isParticleTick(elapsed)) {
-			shatterGround(player, EarthquakeBehavior.particleCountFor(elapsed));
+			// ONE call for both cues, on purpose. The dust and the sound are the same
+			// event and must never be able to drift into different cadences -- the way
+			// to guarantee that is for there to be no second place that decides when a
+			// burst happens. isParticleTick is the only schedule.
+			shatterGround(player, elapsed);
 		}
 		if (!EarthquakeBehavior.isDamageTick(elapsed)) {
 			return;
@@ -182,9 +189,32 @@ public final class EarthquakeService {
 	 * <p>Dispatched through {@code LevelEvent.PARTICLES_SMASH_ATTACK} (2013) rather than
 	 * {@code sendParticles}, which is the cheaper of the two by a wide margin: the level
 	 * event is <b>one small packet</b> (id, {@code BlockPos}, int) broadcast to tracking
-	 * clients, and the eleven-odd particles per point of intensity are then generated
-	 * client-side. {@code sendParticles} would build and send a packet describing the
-	 * burst instead.
+	 * clients, and the particles themselves are generated client-side.
+	 * {@code sendParticles} would build and send a packet describing the burst instead.
+	 *
+	 * <h2>The data int is a PARTICLE COUNT, and the first ship of this was invisible</h2>
+	 *
+	 * <p>See {@link EarthquakeBehavior#PARTICLE_COUNT}. The short version: the intensity
+	 * argument is very nearly a literal particle count (vanilla's mace passes <b>750</b>),
+	 * this shipped passing 2, and 2 renders three particles. It was reported as "particles
+	 * never render" and that report was accurate.
+	 *
+	 * <h2>BOTH broadcasts here take a nullable EXCLUDED player, and it must stay null</h2>
+	 *
+	 * <p>This is the trap worth reading before adding any other self-targeted cue.
+	 * {@code ServerLevel.levelEvent} and {@code ServerLevel.playSeededSound} both end in
+	 * {@code PlayerList.broadcast(Player except, x, y, z, range, dim, packet)}, whose
+	 * first statement is {@code if (player == except) continue}. The argument exists
+	 * because vanilla's usual caller is an action the acting client already predicted
+	 * locally -- block breaking, an attack swing -- so re-sending it would double it up.
+	 *
+	 * <p><b>Nothing about an Earthquake tremor is client-predicted.</b> It is a
+	 * server-side schedule the client has no knowledge of, so passing {@code player}
+	 * there would exclude the one player the effect exists for and be structurally
+	 * guaranteed to render and sound nothing, for them, forever -- while working
+	 * perfectly for every bystander. Both calls below pass {@code null}, which is also
+	 * what {@code MaceItem} passes. The three-argument {@code levelEvent} overload is a
+	 * default method that supplies {@code null} itself.
 	 *
 	 * <h2>Cost, stated for completeness</h2>
 	 *
@@ -206,12 +236,24 @@ public final class EarthquakeService {
 	 * nothing: a packet that produces invisible particles is the same kind of silent
 	 * no-op as a log line that does not say why.
 	 */
-	private static void shatterGround(ServerPlayer player, int intensity) {
+	private static void shatterGround(ServerPlayer player, int elapsed) {
 		ServerLevel level = player.level();
 		BlockPos ground = player.getBlockPosBelowThatAffectsMyMovement();
 		if (level.getBlockState(ground).isAir()) {
 			return;
 		}
-		level.levelEvent(LevelEvent.PARTICLES_SMASH_ATTACK, ground, intensity);
+		level.levelEvent(LevelEvent.PARTICLES_SMASH_ATTACK, ground,
+				EarthquakeBehavior.particleCountFor(elapsed));
+		// SoundSource.BLOCKS because this is the ground breaking and there is no
+		// attacker -- the mace uses the attacker's getSoundSource(), which has no
+		// meaning here. It also puts the cue on the player's Blocks slider, which is
+		// where someone turning down "that grinding noise" would go looking.
+		level.playSound(null, ground,
+				EarthquakeBehavior.isHeavySoundTick(elapsed)
+						? SoundEvents.MACE_SMASH_GROUND_HEAVY
+						: SoundEvents.MACE_SMASH_GROUND,
+				SoundSource.BLOCKS,
+				EarthquakeBehavior.soundVolumeFor(elapsed),
+				EarthquakeBehavior.SOUND_PITCH);
 	}
 }

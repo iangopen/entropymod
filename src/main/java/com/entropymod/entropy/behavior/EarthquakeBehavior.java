@@ -4,8 +4,8 @@ import com.entropymod.entropy.HookEffectBehavior;
 
 /**
  * Earthquake (BAD / DEBUFF, Tier 2) -- the ground shakes on a random timer: Slowness
- * III for the tremor, a brief blindness, two half-heart hits of true damage, and the
- * ground itself thrown up as dust.
+ * IV for the tremor, a brief blindness, two half-heart hits of true damage, and the
+ * ground itself thrown up as dust with a matching impact sound.
  *
  * <h2>Third shape, and NO SafeSpawn</h2>
  *
@@ -77,13 +77,15 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 * silently deliver one. Any tremor shorter than about a second cannot express its
 	 * own damage.
 	 *
-	 * <p><b>The ceiling is playability.</b> The Slowness is a 45% movement penalty (see
+	 * <p><b>The ceiling is playability.</b> The Slowness is a 60% movement penalty (see
 	 * {@link #SLOWNESS_AMPLIFIER}); it is a real tactical window -- you cannot outrun a
-	 * creeper or reposition out of a fight during one -- and at much beyond four seconds
-	 * it starts defining the minute rather than interrupting it, given the tremor
-	 * arrives every 45-180s. <b>This duration is unchanged by the Slowness III retune</b>,
-	 * and so are the two damage ticks: the strengthening happens inside the window
-	 * rather than by widening it.
+	 * creeper even sprinting, or reposition out of a fight, during one -- and at much
+	 * beyond four seconds it starts defining the minute rather than interrupting it,
+	 * given the tremor arrives every 45-180s. <b>This duration is unchanged by the
+	 * Slowness IV retune</b>, and so are the two damage ticks: the strengthening happens
+	 * inside the window rather than by widening it. That ceiling argument is what makes
+	 * the window the thing that must NOT move as the severity goes up -- a 60% penalty
+	 * for four seconds is an interruption, and for ten it would be a punishment.
 	 *
 	 * <p>80 ticks gives the two hits an 80-tick separation, eight times the discard
 	 * window, so they are unambiguously two events with no reliance on the margin.
@@ -91,7 +93,7 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	public static final int TREMOR_TICKS = 80;
 
 	/**
-	 * Slowness <b>III</b>. Amplifier 2 is displayed level III -- see the Phoenix grants
+	 * Slowness <b>IV</b>. Amplifier 3 is displayed level IV -- see the Phoenix grants
 	 * for the {@code "potion.potency." + amplifier} convention.
 	 *
 	 * <h2>The real number, and why the squared rule does NOT apply here</h2>
@@ -105,27 +107,44 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 *   <tr><th></th><th>modifier</th><th>speed x</th><th>walking</th><th>sprinting</th></tr>
 	 *   <tr><td>none</td><td>--</td><td>1.00</td><td>4.3172 b/s</td><td>5.6123 b/s</td></tr>
 	 *   <tr><td>Slowness II (was)</td><td>-0.30</td><td>0.70</td><td>3.0220 b/s</td><td>3.9286 b/s</td></tr>
-	 *   <tr><td><b>Slowness III</b></td><td><b>-0.45</b></td><td><b>0.55</b></td><td><b>2.3745 b/s</b></td><td><b>3.0868 b/s</b></td></tr>
+	 *   <tr><td>Slowness III (was)</td><td>-0.45</td><td>0.55</td><td>2.3745 b/s</td><td>3.0868 b/s</td></tr>
+	 *   <tr><td><b>Slowness IV</b></td><td><b>-0.60</b></td><td><b>0.40</b></td><td><b>1.7269 b/s</b></td><td><b>2.2449 b/s</b></td></tr>
 	 * </table>
 	 *
-	 * <p><b>CLAUDE.md 1e/1l's "real speed goes as the SQUARE of the attribute" is a MOB
-	 * property and is not relevant here.</b> It holds because {@code Mob.setSpeed} also
-	 * calls {@code setZza}, so a mob's forward input is its speed value and
+	 * <p><b>CLAUDE.md 1e/1l/1z's "real speed goes as the SQUARE of the attribute" is a
+	 * MOB property and is not relevant here.</b> It holds because {@code Mob.setSpeed}
+	 * also calls {@code setZza}, so a mob's forward input is its speed value and
 	 * {@code moveRelative} multiplies the two. A player's forward input comes from
 	 * {@code ClientInput} as a normalised 1.0, so player ground speed is <b>linear</b>
 	 * in the attribute and the attribute multiplier <em>is</em> the speed multiplier --
 	 * exactly as recorded for Phoenix Chambered Heart's Speed III grant. Squaring here
-	 * would have predicted 0.3025x and been wrong by nearly half.
+	 * would have predicted 0.16x and been wrong by well over half.
 	 *
-	 * <p><b>Why III rather than II: 2.70 blocks/second.</b> That is a creeper's real
-	 * chasing speed (attribute 0.25, and <em>there</em> the squared rule does apply:
-	 * {@code 0.25^2 / 0.454}). Under Slowness II a walking player manages 3.02 b/s and
-	 * still pulls away from one; under Slowness III they manage <b>2.3745 b/s and no
-	 * longer can</b>. The step from II to III is precisely the threshold where walking
-	 * stops being an escape and sprinting becomes mandatory -- which is what makes the
-	 * tremor a tactical event rather than an inconvenience.
+	 * <h2>Why IV, and the threshold it buys: the SAME creeper, but sprinting</h2>
+	 *
+	 * <p>A creeper's real chasing speed is <b>2.7533 b/s</b> -- {@code MOVEMENT_SPEED}
+	 * {@code 0.25}, read out of {@code Creeper.createAttributes} rather than assumed, and
+	 * <em>there</em> the squared rule does apply ({@code 0.25^2 / 0.454}, x20 for
+	 * b/tick to b/s).
+	 *
+	 * <p>Slowness III already put <em>walking</em> below that line (2.3745 &lt; 2.7533),
+	 * which is what the III retune was for. But it left <b>sprinting at 3.0868 b/s, still
+	 * comfortably clear</b> -- so the tremor's answer was always the same one button, and
+	 * a player holding sprint barely noticed the difference between II and III.
+	 *
+	 * <p><b>Slowness IV puts sprinting at 2.2449 b/s, below the creeper too.</b> That is a
+	 * real second threshold rather than "further past the first one": under IV there is no
+	 * movement speed available to the player that outruns a chasing creeper, so during the
+	 * tremor <em>disengaging is not an option at all</em> and the answer has to be terrain,
+	 * a block, or fighting. Walking at 1.7269 b/s is below every hostile in the game worth
+	 * running from.
+	 *
+	 * <p><b>What it does not do is approach a clamp.</b> 0.40x is a long way from zero;
+	 * the modifier only reaches -1.0 (total immobility) at amplifier 6. The four-second
+	 * window and both damage ticks are unchanged -- the strengthening happens inside the
+	 * window rather than by widening it, for the third retune running.
 	 */
-	public static final int SLOWNESS_AMPLIFIER = 2;
+	public static final int SLOWNESS_AMPLIFIER = 3;
 
 	/**
 	 * How long the player is blinded: <b>2 seconds</b>, half the tremor.
@@ -229,8 +248,39 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 */
 	public static final int PARTICLE_INTERVAL = 10;
 
-	/** Burst intensity on an ordinary tick of the tremor. */
-	public static final int PARTICLE_COUNT = 2;
+	/**
+	 * Burst intensity on an ordinary tick of the tremor.
+	 *
+	 * <h2>THIS NUMBER IS A PARTICLE COUNT, AND THE FIRST SHIP GOT IT 30x TOO SMALL</h2>
+	 *
+	 * <p>Earthquake shipped with {@code PARTICLE_COUNT = 2} and rendered <b>nothing the
+	 * player could see</b>. Nothing was broken: the mixin-free dispatch was correct, the
+	 * packet was broadcast, and the client handled it. The {@code data} int was simply
+	 * read as if it were an abstract "intensity" dial when it is very nearly a literal
+	 * particle count. {@code ParticleUtils.spawnSmashAttackParticles} is two loops:
+	 *
+	 * <pre>
+	 * for (i = 0; i &lt; data / 3.0f;  i++)   // column at the player's feet, gaussian/2 spread
+	 * for (i = 0; i &lt; data / 1.5f;  i++)   // ring at radius 3.5, angle = i RADIANS
+	 * </pre>
+	 *
+	 * <p>so the two loops emit {@code data/3 + data/1.5 == data} particles between them.
+	 * <b>Vanilla's only caller, {@code MaceItem.knockback}, passes 750.</b> At 2 that is
+	 * <em>three</em> particles, of which the ring contributes two -- and the ring sits
+	 * 3.5 blocks away, so exactly one particle per burst was anywhere near the player, for
+	 * a few ticks, some of it while they were blinded. Not a subtlety: invisible.
+	 *
+	 * <p>60 gives 20 in the central column and 40 in the ring, which at 3.5 blocks is
+	 * dense enough to close into a ring rather than read as four stray specks. See
+	 * {@link #PARTICLE_COUNT_ON_HIT} for the whole-tremor budget.
+	 *
+	 * <p><b>The general lesson, because it is not specific to this event:</b> a
+	 * {@code levelEvent} {@code data} int is an opaque per-event encoding with no type and
+	 * no units. The only way to know what it means is to read the client's case for that
+	 * id <em>and</em> the magnitude vanilla's own caller passes. Picking a small number
+	 * because it "looks like an intensity" is guessing.
+	 */
+	public static final int PARTICLE_COUNT = 60;
 
 	/**
 	 * Burst intensity on the two damage ticks.
@@ -238,8 +288,21 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 * <p>Deliberately heavier, so the particles <em>reinforce</em> the half-heart hits
 	 * rather than running uniformly underneath them. The tremor then has a visible
 	 * shape -- big, small small small, big -- matching exactly what the damage is doing.
+	 *
+	 * <p>The whole-tremor budget is the sanity check that this is scaled to the game
+	 * rather than to itself: seven ordinary bursts at 60 plus two heavy ones at 150 is
+	 * <b>720 particles across four seconds</b>, against the <b>750 a single mace smash
+	 * emits in one frame</b>. So a tremor is about one mace smash's worth of dust, spread
+	 * over its window -- visible for the same reason vanilla's is, and no denser.
 	 */
-	public static final int PARTICLE_COUNT_ON_HIT = 5;
+	public static final int PARTICLE_COUNT_ON_HIT = 150;
+
+	/**
+	 * What vanilla's own smash-attack caller passes as {@code data}, kept here so the
+	 * harness can state the shipped values as a fraction of it rather than as bare
+	 * numbers. {@code MaceItem.knockback}, javap-verified: {@code sipush 750}.
+	 */
+	public static final int VANILLA_MACE_SMASH_INTENSITY = 750;
 
 	/** True if a dust burst is thrown on this tick of the tremor. */
 	public static boolean isParticleTick(int elapsed) {
@@ -249,6 +312,71 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	/** Burst intensity for this tick -- heavier on the two damage ticks. */
 	public static int particleCountFor(int elapsed) {
 		return isDamageTick(elapsed) ? PARTICLE_COUNT_ON_HIT : PARTICLE_COUNT;
+	}
+
+	// ==================================================================
+	// The sound cue
+	// ==================================================================
+
+	/**
+	 * Volume of an ordinary burst.
+	 *
+	 * <h2>Which sound, and why it is not a name match</h2>
+	 *
+	 * <p>The sound is {@code SoundEvents.MACE_SMASH_GROUND}, and on the two damage ticks
+	 * {@code MACE_SMASH_GROUND_HEAVY}. Surveying all 1815 constants on
+	 * {@code SoundEvents}, the plausible candidates for a ground impact are
+	 * {@code DECORATED_POT_SHATTER}, {@code GOAT_RAM_IMPACT},
+	 * {@code LIGHTNING_BOLT_IMPACT}, {@code WARDEN_ATTACK_IMPACT} and the three
+	 * {@code MACE_SMASH_*}. The mace pair wins for the same reason {@code DUST_PILLAR}
+	 * did: <b>it is what vanilla already plays alongside event 2013.</b>
+	 * {@code MaceItem.knockback}'s caller picks between {@code MACE_SMASH_GROUND} and
+	 * {@code MACE_SMASH_GROUND_HEAVY} on {@code fallDistance &gt; 5.0} and fires the
+	 * particle event on the same path -- so the audio and the visual here are vanilla's
+	 * own matched pair, not two things chosen separately because their names sounded
+	 * right. It also hands the light/heavy split the cadence already needs for free.
+	 *
+	 * <h2>Volume and pitch</h2>
+	 *
+	 * <p>Vanilla plays the mace at 1.0/1.0 <em>once</em>. This plays nine times in four
+	 * seconds, so an ordinary burst is pulled down to 0.6 and pitched to
+	 * {@link #SOUND_PITCH} -- below 1.0 the sample plays slower and deeper, which is what
+	 * turns a weapon impact into a rumble. The two damage ticks get the heavy sample at
+	 * full volume.
+	 *
+	 * <p><b>Range is not at risk from the quiet value.</b> {@code SoundEvent.getRange(v)}
+	 * is {@code v > 1 ? 16*v : 16}, so a sub-1.0 volume does not shrink the 16-block
+	 * broadcast radius -- and the player is standing at the source.
+	 */
+	public static final float SOUND_VOLUME = 0.6f;
+
+	/** Volume on the two damage ticks -- vanilla's own mace volume. */
+	public static final float SOUND_VOLUME_ON_HIT = 1.0f;
+
+	/**
+	 * Pitch for every burst: <b>0.6</b>, deliberately deep.
+	 *
+	 * <p>The client's mixer clamps pitch to {@code [0.5, 2.0]}, so this is inside the
+	 * range with margin rather than sitting on the floor where a later nudge downward
+	 * would silently do nothing. Both bursts share one pitch so the heavy hits read as
+	 * <em>the same tremor, louder</em> rather than as a different event.
+	 */
+	public static final float SOUND_PITCH = 0.6f;
+
+	/** Volume for this tick -- louder on the two damage ticks, matching the dust. */
+	public static float soundVolumeFor(int elapsed) {
+		return isDamageTick(elapsed) ? SOUND_VOLUME_ON_HIT : SOUND_VOLUME;
+	}
+
+	/**
+	 * True if this tick's burst should use the heavy sample.
+	 *
+	 * <p>Deliberately the same predicate the particle count uses, so the sound and the
+	 * dust cannot drift into different cadences: there is exactly one notion of "this is
+	 * a big tick" and both read it.
+	 */
+	public static boolean isHeavySoundTick(int elapsed) {
+		return isDamageTick(elapsed);
 	}
 
 	/** True while the player is still blinded. */

@@ -314,6 +314,20 @@ number. Vanilla's only true-damage precedent is **sonic boom, not the void**:
 Protection. And `LivingEntity.INVULNERABLE_DURATION` puts a **10-tick floor** under any
 effect that promises two hits — closer than that and the second is discarded silently.
 
+**1ac/1ad. TWO ways to ship a cue the TARGETED player never sees, with a green build.**
+Both were hit on Earthquake's particles; both are in `entropy-effects`, flagged. **A
+`levelEvent` `data` int is an untyped per-event encoding** — for `PARTICLES_SMASH_ATTACK`
+it is very nearly a literal particle count, and shipping `2` where vanilla's own caller
+passes **750** rendered three particles, two of them 3.5 blocks away. Read the client's
+`switch` case for the units *and* vanilla's caller for the scale; the second is the one
+that catches it. Separately, **`levelEvent` and `playSound` both take a player to
+EXCLUDE** as their first argument (`PlayerList.broadcast`: `if (player == except)
+continue`), because vanilla's usual caller is a client-predicted action. Nothing a mod
+schedules server-side is predicted, so **it must be `null`** — passing the affected
+player delivers the cue to every bystander and never to them. `levelEvent`'s 3-arg
+overload is safe by construction; **`playSound` has no safe overload.** Regression-tested
+by `Checks.methodPushesExplicitNull`, which decodes bytecode rather than scanning it.
+
 **1z. The squared speed rule (1e/1l) is a MOB rule — it does NOT apply to players.**
 A mob's forward input is its own speed value (`Mob.setSpeed` also calls `setZza`); a
 player's comes from `ClientInput` as a normalised 1.0, so player ground speed is
