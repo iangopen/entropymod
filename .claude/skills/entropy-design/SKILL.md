@@ -14,6 +14,8 @@ description: Entropy Mod design state — per-component status and known gaps, t
 abandoned". `./gradlew harness` asserts that unbuilt halves are genuinely
 *absent* rather than half-present — keep it that way.
 
+**See also:** `FRAMEWORK-IDEAS.md` at the project root — a human-facing running list of framework/tooling gaps this project hit that a standalone Fabric library could solve, and of features scoped down for lack of one; add to it whenever a session hits another "no clean framework exists for this" wall.
+
 ## Part 1: Evaluation of what's built so far
 
 ### `EntropyManager` (the timer/loop) — solid core, missing win-detection
