@@ -216,9 +216,19 @@ public final class EffectRegistry {
 		register("vampire_rules", "Vampire Rules",
 				"Damage you deal feeds you -- 8 damage restores a hunger shank, overflowing into saturation",
 				EffectCategory.SURVIVAL, EffectPhase.GOOD, 25, 50, true);
+		// Earthquake moved 25-50 -> 40-60 and counterplay true -> FALSE, and it is the
+		// same resolution Unstable reached above rather than a coincidence. Slowness IV
+		// became a real movement lock and the blindness went from half the window to all
+		// of it, so during a tremor the player cannot walk, jump, sprint or see, and
+		// both half-heart hits land regardless of anything they do. That is the
+		// definition of no counterplay, and CLAUDE.md Part 2 forbids a
+		// counterplay = false effect below entropy 40. 40-60 also matches Glass Cannon
+		// Pact's shape. Attacking and mining still work -- it is a movement lock, not an
+		// input lock -- but neither changes the tremor's outcome.
 		register("earthquake", "Earthquake",
-				"Every 45s-3min the ground shakes: Slowness IV, blindness and two half-hearts of unblockable damage",
-				EffectCategory.DEBUFF, EffectPhase.BAD, 25, 50, true);
+				"Every 45s-3min the ground pins you: no movement, blind, and two "
+						+ "half-hearts of unblockable damage you cannot avoid",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 40, 60, false);
 
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.

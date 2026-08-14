@@ -61,6 +61,16 @@ public final class ClientRunState {
 	private static int jumpCountdown = 0;
 	private static final Random RANDOM = new Random();
 
+	/**
+	 * Ticks left in an Earthquake tremor's movement lock. Zero means free to move.
+	 *
+	 * <p>Set by {@code TremorLockPayload} and counted down once per client tick. It is a
+	 * countdown rather than a flag on purpose: a lost "unlock" packet would otherwise
+	 * paralyse the player until they relogged, whereas a duration that expires by itself
+	 * can only ever fail in the harmless direction. See {@code TremorLockPayload}.
+	 */
+	private static int tremorLockTicks = 0;
+
 	/** Replaces the cached view. Called from the payload receiver on the client thread. */
 	public static void update(List<String> effectIds, String scramble) {
 		EFFECTS.clear();
@@ -104,6 +114,7 @@ public final class ClientRunState {
 		EFFECTS.clear();
 		moveScramble = "";
 		jumpCountdown = 0;
+		tremorLockTicks = 0;
 		// Back to the permissive defaults, for the same reason they are the
 		// defaults: the next server may not speak this protocol at all.
 		runState = RunState.IN_PROGRESS;
@@ -187,6 +198,41 @@ public final class ClientRunState {
 		}
 		scheduleNextJump();
 		return true;
+	}
+
+	/**
+	 * Starts (or restarts) the Earthquake movement lock for {@code ticks} ticks.
+	 *
+	 * <p>Assignment, not accumulation -- a second tremor arriving while one is somehow
+	 * still counting down replaces the remainder rather than adding to it, so the lock
+	 * can never outlast one tremor's worth of paralysis however many packets arrive.
+	 */
+	public static void beginTremorLock(int ticks) {
+		tremorLockTicks = Math.max(0, ticks);
+	}
+
+	/**
+	 * True while the player is rooted by a tremor. Read by
+	 * {@code ClientImmobileMixin}.
+	 */
+	public static boolean isTremorLocked() {
+		return tremorLockTicks > 0;
+	}
+
+	/**
+	 * Counts the lock down by one tick. Called once per client tick from
+	 * {@code EntropyModClient}'s {@code END_CLIENT_TICK} handler.
+	 *
+	 * <p>Deliberately NOT driven from {@code KeyboardInputMixin} the way
+	 * {@code tickForcedJump} is. That one has to run immediately before vanilla reads
+	 * the jump press, because it fakes a press; this one only has to be accurate to a
+	 * tick, and {@code isImmobile()} is read from {@code aiStep} rather than from input
+	 * handling, so there is no ordering requirement to honour.
+	 */
+	public static void tickTremorLock() {
+		if (tremorLockTicks > 0) {
+			tremorLockTicks--;
+		}
 	}
 
 	private static void scheduleNextJump() {

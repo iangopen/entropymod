@@ -3,9 +3,17 @@ package com.entropymod.entropy.behavior;
 import com.entropymod.entropy.HookEffectBehavior;
 
 /**
- * Earthquake (BAD / DEBUFF, Tier 2) -- the ground shakes on a random timer: Slowness
- * IV for the tremor, a brief blindness, two half-heart hits of true damage, and the
- * ground itself thrown up as dust with a matching impact sound.
+ * Earthquake (BAD / DEBUFF, entropy 40-60, <b>counterplay = false</b>) -- the ground
+ * shakes on a random timer and you cannot move: total movement paralysis, blindness and
+ * Mining Fatigue for the whole four-second window, two half-heart hits of true damage,
+ * and the ground itself thrown up as dust with a matching impact sound.
+ *
+ * <p><b>This is no longer a survivable interruption and is no longer labelled as one.</b>
+ * Slowness IV was replaced by a real movement lock, the blindness was extended from half
+ * the window to all of it, and the effect moved to entropy 40-60 with
+ * {@code counterplay = false} -- the same resolution Unstable reached, for the same
+ * reason: CLAUDE.md Part 2 forbids a {@code counterplay = false} effect below 40. See
+ * {@link #PARALYSIS_TICKS} for the mechanism and why no Slowness value could deliver it.
  *
  * <h2>Third shape, and NO SafeSpawn</h2>
  *
@@ -67,7 +75,7 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 * How long one tremor lasts: <b>4 seconds</b>.
 	 *
 	 * <p>The brief left this open. It is set from the bottom by a hard vanilla
-	 * constraint and from the top by what the Slowness costs.
+	 * constraint and from the top by what the movement lock costs.
 	 *
 	 * <p><b>The floor is {@code LivingEntity.INVULNERABLE_DURATION}.</b> In
 	 * {@code hurtServer}, a hit sets {@code invulnerableTime = 20}, and while that
@@ -77,15 +85,19 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 * silently deliver one. Any tremor shorter than about a second cannot express its
 	 * own damage.
 	 *
-	 * <p><b>The ceiling is playability.</b> The Slowness is a 60% movement penalty (see
-	 * {@link #SLOWNESS_AMPLIFIER}); it is a real tactical window -- you cannot outrun a
-	 * creeper even sprinting, or reposition out of a fight, during one -- and at much
-	 * beyond four seconds it starts defining the minute rather than interrupting it,
-	 * given the tremor arrives every 45-180s. <b>This duration is unchanged by the
-	 * Slowness IV retune</b>, and so are the two damage ticks: the strengthening happens
-	 * inside the window rather than by widening it. That ceiling argument is what makes
-	 * the window the thing that must NOT move as the severity goes up -- a 60% penalty
-	 * for four seconds is an interruption, and for ten it would be a punishment.
+	 * <p><b>The ceiling is playability, and it now binds much harder than it used to.</b>
+	 * The player is not slowed, they are <em>rooted</em> (see {@link #PARALYSIS_TICKS}),
+	 * blind, and unable to mine at normal speed, for the whole window. Four seconds of
+	 * that arriving every 45-180s is an interruption; ten seconds of it would be a
+	 * hostage situation, and a creeper that walked up during one would simply end the run
+	 * with no input from the player at all.
+	 *
+	 * <p><b>This duration has survived every retune -- Slowness II, III, IV, and now the
+	 * paralysis -- and so have the two damage ticks.</b> That is the pattern worth
+	 * copying: when a curse needs to be more severe, raise the severity <em>inside</em>
+	 * the window and leave the window alone. Each retune's own ceiling argument was the
+	 * thing that stopped the duration drifting upward alongside the strength, which is
+	 * how a four-second annoyance becomes a ten-second punishment one step at a time.
 	 *
 	 * <p>80 ticks gives the two hits an 80-tick separation, eight times the discard
 	 * window, so they are unambiguously two events with no reliance on the margin.
@@ -93,63 +105,185 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	public static final int TREMOR_TICKS = 80;
 
 	/**
-	 * Slowness <b>IV</b>. Amplifier 3 is displayed level IV -- see the Phoenix grants
-	 * for the {@code "potion.potency." + amplifier} convention.
+	 * How many ticks a tremor actually occupies: <b>81</b>, not 80.
 	 *
-	 * <h2>The real number, and why the squared rule does NOT apply here</h2>
+	 * <p>{@link #TREMOR_TICKS} is the <em>index of the last tick</em>, not a count.
+	 * {@code isFinished(elapsed)} is {@code elapsed >= TREMOR_TICKS} and the tracker
+	 * drops the tremor on that tick, so {@code elapsed} really runs
+	 * {@code 0, 1, ... 80} -- <b>eighty-one ticks</b>, with a damage hit on the first
+	 * and the last.
 	 *
-	 * <p>Vanilla registers Slowness as {@code MOVEMENT_SPEED},
-	 * <b>-0.15000000596046448</b>, {@code ADD_MULTIPLIED_TOTAL}, and
-	 * {@code AttributeTemplate.create} scales by {@code amplifier + 1}. So:
-	 *
-	 * <table border="1">
-	 *   <caption>what each level actually multiplies speed by</caption>
-	 *   <tr><th></th><th>modifier</th><th>speed x</th><th>walking</th><th>sprinting</th></tr>
-	 *   <tr><td>none</td><td>--</td><td>1.00</td><td>4.3172 b/s</td><td>5.6123 b/s</td></tr>
-	 *   <tr><td>Slowness II (was)</td><td>-0.30</td><td>0.70</td><td>3.0220 b/s</td><td>3.9286 b/s</td></tr>
-	 *   <tr><td>Slowness III (was)</td><td>-0.45</td><td>0.55</td><td>2.3745 b/s</td><td>3.0868 b/s</td></tr>
-	 *   <tr><td><b>Slowness IV</b></td><td><b>-0.60</b></td><td><b>0.40</b></td><td><b>1.7269 b/s</b></td><td><b>2.2449 b/s</b></td></tr>
-	 * </table>
-	 *
-	 * <p><b>CLAUDE.md 1e/1l/1z's "real speed goes as the SQUARE of the attribute" is a
-	 * MOB property and is not relevant here.</b> It holds because {@code Mob.setSpeed}
-	 * also calls {@code setZza}, so a mob's forward input is its speed value and
-	 * {@code moveRelative} multiplies the two. A player's forward input comes from
-	 * {@code ClientInput} as a normalised 1.0, so player ground speed is <b>linear</b>
-	 * in the attribute and the attribute multiplier <em>is</em> the speed multiplier --
-	 * exactly as recorded for Phoenix Chambered Heart's Speed III grant. Squaring here
-	 * would have predicted 0.16x and been wrong by well over half.
-	 *
-	 * <h2>Why IV, and the threshold it buys: the SAME creeper, but sprinting</h2>
-	 *
-	 * <p>A creeper's real chasing speed is <b>2.7533 b/s</b> -- {@code MOVEMENT_SPEED}
-	 * {@code 0.25}, read out of {@code Creeper.createAttributes} rather than assumed, and
-	 * <em>there</em> the squared rule does apply ({@code 0.25^2 / 0.454}, x20 for
-	 * b/tick to b/s).
-	 *
-	 * <p>Slowness III already put <em>walking</em> below that line (2.3745 &lt; 2.7533),
-	 * which is what the III retune was for. But it left <b>sprinting at 3.0868 b/s, still
-	 * comfortably clear</b> -- so the tremor's answer was always the same one button, and
-	 * a player holding sprint barely noticed the difference between II and III.
-	 *
-	 * <p><b>Slowness IV puts sprinting at 2.2449 b/s, below the creeper too.</b> That is a
-	 * real second threshold rather than "further past the first one": under IV there is no
-	 * movement speed available to the player that outruns a chasing creeper, so during the
-	 * tremor <em>disengaging is not an option at all</em> and the answer has to be terrain,
-	 * a block, or fighting. Walking at 1.7269 b/s is below every hostile in the game worth
-	 * running from.
-	 *
-	 * <p><b>What it does not do is approach a clamp.</b> 0.40x is a long way from zero;
-	 * the modifier only reaches -1.0 (total immobility) at amplifier 6. The four-second
-	 * window and both damage ticks are unchanged -- the strengthening happens inside the
-	 * window rather than by widening it, for the third retune running.
+	 * <p><b>This distinction is not pedantry, and it is why this constant exists rather
+	 * than {@code TREMOR_TICKS} being reused for the grants.</b> A
+	 * {@code MobEffectInstance} granted with duration 80 on the tick the tremor begins
+	 * is live for {@code elapsed} 0-79 and has <em>already expired</em> by the closing
+	 * hit at 80. Every duration in this effect is therefore measured from here, so an
+	 * effect that is supposed to cover the tremor covers all of it including both hits.
 	 */
-	public static final int SLOWNESS_AMPLIFIER = 3;
+	public static final int TREMOR_SPAN_TICKS = TREMOR_TICKS + 1;
 
 	/**
-	 * How long the player is blinded: <b>2 seconds</b>, half the tremor.
+	 * Mining Fatigue <b>I</b> for the whole tremor. Amplifier 0 is displayed level I --
+	 * the {@code "potion.potency." + amplifier} convention, and 0 maps to the empty
+	 * string so no roman numeral is shown at all.
 	 *
-	 * <h2>"Brief" has a hard floor, and it is about 20 ticks</h2>
+	 * <p>Unlike Blindness (whose amplifier is meaningless -- see
+	 * {@link #BLINDNESS_AMPLIFIER}) this one is read: vanilla registers Mining Fatigue
+	 * with an {@code ADD_MULTIPLIED_TOTAL} template on {@code BLOCK_BREAK_SPEED}, so the
+	 * amplifier genuinely scales it. I is deliberate rather than a default -- the
+	 * paralysis is the effect, and a level that made mining pointless would remove the
+	 * one thing a rooted player can still usefully do.
+	 */
+	public static final int MINING_FATIGUE_AMPLIFIER = 0;
+
+	/**
+	 * How long the mining slowdown lasts: the whole tremor, same as everything else.
+	 *
+	 * <p>There is exactly one duration in this effect now. Blindness, Mining Fatigue and
+	 * the paralysis all run {@link #TREMOR_TICKS}, so there is no second timeline to keep
+	 * in step and no window in which one has expired and another has not.
+	 */
+	public static final int MINING_FATIGUE_TICKS = TREMOR_SPAN_TICKS;
+
+	/**
+	 * How long the player is rooted in place: <b>the whole tremor</b>.
+	 *
+	 * <h2>SLOWNESS IS GONE, AND NO VALUE OF IT COULD HAVE DONE THIS</h2>
+	 *
+	 * <p>The effect used to grant Slowness IV (amplifier 3, a 60% movement penalty). It
+	 * now grants nothing on {@code MOVEMENT_SPEED} at all, and the reason is not that IV
+	 * was too weak -- it is that <b>the attribute cannot express paralysis at any
+	 * value.</b>
+	 *
+	 * <p><b>The attribute really does reach zero.</b> {@code Attributes}' {@code <clinit>}
+	 * registers {@code movement_speed} as {@code RangedAttribute(..., 0.7, 0.0, 1024.0)}
+	 * -- the minimum is a literal {@code dconst_0} -- and Slowness at amplifier 6 gets
+	 * there: {@code -0.15000000596046448 x 7 = -1.05}, and {@code ADD_MULTIPLIED_TOTAL}
+	 * computes {@code value *= 1 + amount}, i.e. {@code value x -0.05}, which
+	 * {@code sanitizeValue} clamps to {@code 0.0}. <b>So "the attribute has a floor above
+	 * zero" is false.</b> The floor is not the problem.
+	 *
+	 * <p><b>The problem is that a player at zero MOVEMENT_SPEED is still mobile</b>, by
+	 * three independent routes -- every one of them already javap-verified by this project
+	 * for Slippery Grip, which was burned by exactly these:
+	 *
+	 * <table border="1">
+	 *   <caption>what vanilla movement reads, and what it ignores</caption>
+	 *   <tr><th>#</th><th>site</th><th>reads MOVEMENT_SPEED?</th></tr>
+	 *   <tr><td>1</td><td>{@code getFrictionInfluencedSpeed} =
+	 *       {@code onGround() ? getSpeed()*(0.216/f^3) : getFlyingSpeed()}</td>
+	 *       <td><b>airborne branch: NO</b></td></tr>
+	 *   <tr><td>2</td><td>{@code Player.getFlyingSpeed} =
+	 *       {@code isSprinting() ? 0.025999999f : 0.02f}</td>
+	 *       <td><b>NO</b> -- hardcoded constants</td></tr>
+	 *   <tr><td>3</td><td>{@code jumpFromGround}'s sprint branch: flat
+	 *       {@code +0.2} blocks/tick forward</td><td><b>NO</b></td></tr>
+	 * </table>
+	 *
+	 * <p>and {@code JUMP_STRENGTH} is a separate attribute, so vertical jumping is
+	 * untouched by Slowness at any level. <b>Slowness 255 leaves a player who can jump
+	 * freely and bunny-hop away with full air control.</b> That is the finding: the
+	 * ceiling on slowness is not numeric, it is structural.
+	 *
+	 * <h2>What DOES work: {@code Player.isImmobile()}, vanilla's own movement lock</h2>
+	 *
+	 * <p>Inside {@code LivingEntity.aiStep}, javap-verified by offset:
+	 *
+	 * <pre>
+	 * 218:  applyInput()              // writes xxa / zza / jumping from the input source
+	 * 222:  if (isImmobile()) {
+	 * 230:      this.jumping = false;
+	 * 235:      this.xxa = 0.0f;      // strafe input
+	 * 240:      this.zza = 0.0f;      // forward input
+	 *       }
+	 * 460:  jumpFromGround()          // gated on this.jumping
+	 * 516:  new Vec3(xxa, yya, zza) -> travel()
+	 * </pre>
+	 *
+	 * <p><b>It zeroes three fields and nothing else</b>, and the ordering is exactly
+	 * right: the write happens after {@code applyInput} has read the keyboard and before
+	 * both consumers. It also closes all three leaks above at once -- with {@code xxa}
+	 * and {@code zza} zero, {@code moveRelative} multiplies a zero vector, so the
+	 * airborne {@code getFlyingSpeed} branch has nothing to accelerate; with
+	 * {@code jumping} false the {@code +0.2} sprint impulse is never reached.
+	 *
+	 * <p><b>This is a MOVEMENT-only lock by construction, not by care.</b> Attacking,
+	 * mining and item use never touch {@code xxa}, {@code zza} or {@code jumping} -- they
+	 * run off {@code Minecraft.handleKeybinds} / {@code MultiPlayerGameMode} and the
+	 * attack/use packets, on a completely separate path from {@code aiStep}'s movement
+	 * block. That is why sleeping, {@code isImmobile}'s only vanilla player use, leaves
+	 * them alone. The harness asserts each of the three permitted actions individually.
+	 *
+	 * <p><b>Why it needs a client half.</b> The zeroing must happen where movement is
+	 * <em>simulated</em>, and for a player that is the client: {@code ServerPlayer} never
+	 * writes {@code jumping}, {@code xxa} or {@code zza} at all. Vanilla's own design
+	 * confirms the shape -- {@code ServerGamePacketListenerImpl.handleMovePlayer} offsets
+	 * 333-378 are
+	 * {@code if (isSleeping()) { if (distSqr > 1.0) teleport(back); return; }}, a
+	 * deliberately generous server-side backstop that exists only because the client-side
+	 * input lock already did the work. So this ships as two side-scoped mixins plus
+	 * {@code TremorLockPayload}, which is what tells the client a tremor is running.
+	 *
+	 * <p>Held at {@link #TREMOR_TICKS} so there is one duration for the whole effect.
+	 */
+	public static final int PARALYSIS_TICKS = TREMOR_SPAN_TICKS;
+
+	/**
+	 * True while the player is rooted in place, {@code elapsed} ticks into a tremor.
+	 *
+	 * <p>Minecraft-free so the harness drives the real predicate, including that it spans
+	 * both damage ticks and expires exactly with the window.
+	 */
+	public static boolean isParalysed(int elapsed) {
+		return elapsed >= 0 && elapsed < PARALYSIS_TICKS;
+	}
+
+	/**
+	 * Vanilla's blindness ease-out window: <b>20 ticks</b>, read out of
+	 * {@code BlindnessFogEnvironment.setupFog}'s {@code Mth.lerp(min(1, duration / 20.0f),
+	 * ...)} and {@code getModifiedDarkness}'s {@code endsWithin(19)}.
+	 *
+	 * <p>Named rather than inlined because it appears in two different roles: it is the
+	 * floor below which a blindness is <em>entirely</em> fade (so "brief" has a minimum),
+	 * and it is the amount by which any grant must OVERSHOOT the window it is meant to
+	 * cover at full strength. Both readings are the same 20 and both are load-bearing
+	 * here.
+	 */
+	public static final int BLINDNESS_FADE_TICKS = 20;
+
+	/**
+	 * How long the player is blinded: <b>the whole tremor</b>, 4 seconds.
+	 *
+	 * <h2>THIS DELIBERATELY REMOVES THE REACTION WINDOW</h2>
+	 *
+	 * <p>It was 40 ticks -- half the window -- and that number was chosen to buy
+	 * counterplay: "ending it at 40 hands the player two full seconds of restored vision
+	 * before the closing hit at tick 80, so the second hit is one they can see coming and
+	 * position for." That argument was correct, and it was load-bearing for the effect's
+	 * old {@code counterplay = true}.
+	 *
+	 * <p><b>It is now 80, and the old javadoc's own warning is the accurate description
+	 * of what ships:</b> "blinding through the whole window would make both hits
+	 * unavoidable and quietly cost this effect its {@code counterplay = true}." That is
+	 * exactly the intent, and the flag moved with it rather than being quietly left
+	 * behind -- see {@code EffectRegistry}, where Earthquake is now
+	 * {@code counterplay = false} at entropy 40-60.
+	 *
+	 * <p><b>The resulting experience, stated plainly:</b> the player is blind and rooted
+	 * in place from tick 0, takes the opening half-heart on that same tick, cannot walk,
+	 * jump or sprint for four seconds, cannot see what is around them for any of it, and
+	 * takes the closing half-heart at tick 80 with the blindness still at full strength.
+	 * There is no moment in the window with vision, and no moment with mobility. Mining
+	 * Fatigue runs underneath the whole of it. <b>There is no reaction window at all</b>
+	 * -- attacking and mining still work, but nothing the player does changes the
+	 * outcome of the tremor itself.
+	 *
+	 * <p>One consequence worth stating because it is a real change in feel rather than a
+	 * number: the 20-tick fade-out now lands on the <em>closing</em> hit rather than in
+	 * the middle of the window, so vision returns as the tremor ends instead of halfway
+	 * through it. The tremor reads as one continuous event rather than two halves.
+	 *
+	 * <h2>"Brief" had a hard floor, and it was about 20 ticks</h2>
 	 *
 	 * <p>Blindness is not a step function. {@code BlindnessFogEnvironment.setupFog},
 	 * javap-verified, is:
@@ -172,25 +306,45 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 * full strength is 21 ticks. So "brief" cannot mean "a few ticks" here; below the
 	 * fade window it stops being brief and becomes merely weak.
 	 *
-	 * <p>40 ticks is the smallest value that is unambiguously the effect rather than the
-	 * fade: <b>20 ticks at full darkness, then the 20-tick ease-out</b>.
+	 * <h2>AND IT IS WHY "80 TICKS" IS GRANTED AS 101</h2>
 	 *
-	 * <p><b>It starts with the tremor, at tick 0</b>, and that is a timing decision
-	 * about the two damage hits rather than a default. Beginning it at 0 puts it on the
-	 * same tick as the opening half-heart, so the blindness is the thing that explains
-	 * the hit. Ending it at 40 -- the halfway point -- hands the player <b>two full
-	 * seconds of restored vision before the closing hit at tick 80</b>, so the second
-	 * hit is one they can see coming and position for. Blinding through the whole window
-	 * would make both hits unavoidable and quietly cost this effect its
-	 * {@code counterplay = true}; offsetting the start would mean blindness arriving
-	 * mid-tremor with no triggering event, which reads as a bug rather than as a tremor.
+	 * <p>The brief asked for blindness across the full 80-tick window. <b>Granting 80
+	 * would not have delivered it, and the failure would have landed exactly on the hit
+	 * the change exists to cover.</b> Because the lerp reads REMAINING duration, a grant
+	 * of {@code D} at tick 0 is at full darkness only while {@code D - elapsed >= 20}:
+	 *
+	 * <table border="1">
+	 *   <caption>what each grant actually delivers</caption>
+	 *   <tr><th>grant</th><th>full darkness for</th><th>still live until</th>
+	 *       <th>second hit (elapsed 80) blind?</th></tr>
+	 *   <tr><td>80</td><td>elapsed 0-60</td><td>elapsed 79</td>
+	 *       <td><b>NO -- expired entirely</b></td></tr>
+	 *   <tr><td>81</td><td>elapsed 0-61</td><td>elapsed 80</td>
+	 *       <td><b>NO -- fully faded out</b></td></tr>
+	 *   <tr><td><b>101</b></td><td><b>elapsed 0-81</b></td><td>elapsed 100</td>
+	 *       <td><b>YES, at full strength</b></td></tr>
+	 * </table>
+	 *
+	 * <p>So the literal reading of "blind for the whole window" restores vision precisely
+	 * in time for the closing half-heart -- i.e. it reinstates the two-second reaction
+	 * window this change exists to delete, just moved. {@code TREMOR_SPAN_TICKS +
+	 * BLINDNESS_FADE_TICKS} is the smallest grant that means what was asked.
+	 *
+	 * <p>The old 40-tick floor is kept on record because it still constrains any future
+	 * retune <em>downward</em>.
+	 *
+	 * <p><b>It starts with the tremor, at tick 0</b>, which is unchanged and is still a
+	 * decision rather than a default: beginning it at 0 puts it on the same tick as the
+	 * opening half-heart, so the blindness is the thing that explains the hit. Offsetting
+	 * the start would mean blindness arriving mid-tremor with no triggering event, which
+	 * reads as a bug rather than as a tremor.
 	 *
 	 * <p>Amplifier is 0 and could not be anything else: Blindness is registered as a
 	 * bare {@code MobEffect(HARMFUL, ...)} with no {@code addAttributeModifier} call at
 	 * all, so nothing reads its amplifier -- already established for Phoenix Chambered
 	 * Heart and asserted at amplifiers 0-9 there.
 	 */
-	public static final int BLINDNESS_TICKS = 40;
+	public static final int BLINDNESS_TICKS = TREMOR_SPAN_TICKS + BLINDNESS_FADE_TICKS;
 
 	/** Blindness has no attribute template, so the amplifier is meaningless. */
 	public static final int BLINDNESS_AMPLIFIER = 0;
@@ -203,7 +357,7 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 	 *
 	 * <p>Chosen over "evenly spaced" because it makes the tremor's shape legible: the
 	 * first hit is what tells the player it has started, the second is what tells them
-	 * it is over, and the Slowness in between is bracketed by them. Evenly spacing two
+	 * it is over, and the paralysis in between is bracketed by them. Evenly spacing two
 	 * hits inside 80 ticks would put them at 27 and 53 with silence at both ends, so
 	 * the beginning and end of the window -- the two moments the player has to react
 	 * to -- would be the two moments nothing happens.
@@ -379,8 +533,23 @@ public final class EarthquakeBehavior extends HookEffectBehavior {
 		return isDamageTick(elapsed);
 	}
 
-	/** True while the player is still blinded. */
+	/** True while the blindness grant is still live at all, fade included. */
 	public static boolean isBlinded(int elapsed) {
 		return elapsed >= 0 && elapsed < BLINDNESS_TICKS;
+	}
+
+	/**
+	 * True while the blindness is at <b>full darkness</b> rather than easing out.
+	 *
+	 * <p>This is the predicate that matters, and it is separate from {@link #isBlinded}
+	 * deliberately: the two disagree for the final {@link #BLINDNESS_FADE_TICKS} ticks of
+	 * the grant, and the whole point of the 101-tick duration is that both damage ticks
+	 * fall inside <em>this</em> one rather than merely inside the other.
+	 *
+	 * <p>The condition is vanilla's, restated: the fog lerp is at factor 1.0 while the
+	 * REMAINING duration is at least the fade window.
+	 */
+	public static boolean isFullyBlinded(int elapsed) {
+		return elapsed >= 0 && (BLINDNESS_TICKS - elapsed) >= BLINDNESS_FADE_TICKS;
 	}
 }

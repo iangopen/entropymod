@@ -6,6 +6,7 @@
 		"EntropyModClientMixin",
 		"CameraMixin",
 		"ClientFlyingSpeedMixin",
+		"ClientImmobileMixin",
 		"ClientSprintJumpMixin",
 		"ClientSprintMixin",
 		"KeyboardInputMixin"

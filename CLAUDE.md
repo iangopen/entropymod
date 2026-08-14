@@ -314,6 +314,18 @@ number. Vanilla's only true-damage precedent is **sonic boom, not the void**:
 Protection. And `LivingEntity.INVULNERABLE_DURATION` puts a **10-tick floor** under any
 effect that promises two hits — closer than that and the second is discarded silently.
 
+**1af/1ag. NO attribute value can immobilise a player, and the lock belongs on the
+CLIENT.** `MOVEMENT_SPEED`'s floor really is 0.0 and Slowness 6 reaches it — that is not
+the obstacle. A player at zero still jumps and bunny-hops, because `getFlyingSpeed`
+(hardcoded `0.02`/`0.026`), `jumpFromGround`'s flat `+0.2` sprint impulse and
+`JUMP_STRENGTH` read no `MOVEMENT_SPEED` at all. Use **`Player.isImmobile()`**, vanilla's
+own lock: it zeroes `jumping`/`xxa`/`zza` in `aiStep` between `applyInput` (218) and both
+consumers (460, 516), which is a **movement-only** lock — attack/mine/interact run off a
+different path entirely. It must be **client-side**: `ServerPlayer` never writes those
+fields, and vanilla's own `handleMovePlayer` sleeping branch is only a generous
+snap-back backstop behind the client lock. See `entropy-effects` 1af-1ah, including why
+"blind for the whole 80-tick window" has to be granted as **101**.
+
 **1ac/1ad. TWO ways to ship a cue the TARGETED player never sees, with a green build.**
 Both were hit on Earthquake's particles; both are in `entropy-effects`, flagged. **A
 `levelEvent` `data` int is an untyped per-event encoding** — for `PARTICLES_SMASH_ATTACK`

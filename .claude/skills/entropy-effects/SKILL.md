@@ -4486,6 +4486,164 @@ sample plays slower and deeper, which is what turns a weapon impact into a rumbl
 0.6 sits above the client mixer's 0.5 clamp with margin rather than on the floor where a
 later nudge downward would silently do nothing.
 
+---
+
+### Earthquake becomes unavoidable — paralysis, full blindness, and the tier move
+Third retune of this effect. Slowness IV is **gone**, replaced by a real movement lock;
+blindness went from half the window to all of it; and the effect moved to **entropy
+40-60 with `counterplay = false`**, the same resolution Unstable reached. Findings
+1af-1ai. **1af is the most reusable — it is a whole class of effect this project could
+not previously build.**
+
+#### 1af. ⚑ NO VALUE OF AN ATTRIBUTE CAN IMMOBILISE A PLAYER. Use `isImmobile()`.
+The obvious reading is that Slowness has a floor and the floor is what stops you.
+**That is false, and believing it sends you looking for a bigger number.**
+
+**The attribute really does reach zero.** `Attributes`' `<clinit>` registers
+`movement_speed` as `RangedAttribute(..., 0.7, 0.0, 1024.0)` — the minimum is a literal
+`dconst_0` — and Slowness at amplifier 6 gets there: `-0.15000000596046448 × 7 = -1.05`,
+and `ADD_MULTIPLIED_TOTAL` is `value *= 1 + amount`, i.e. `value × -0.05`, which
+`sanitizeValue` clamps to `0.0`.
+
+**A player at zero `MOVEMENT_SPEED` is still mobile**, by three routes that read no
+attribute at all — every one of them already javap-verified here for Slippery Grip:
+
+| # | site | reads the attribute? |
+|---|---|---|
+| 1 | `getFrictionInfluencedSpeed` = `onGround() ? getSpeed()*(0.216/f³) : getFlyingSpeed()` | **airborne branch: NO** |
+| 2 | `Player.getFlyingSpeed` = `isSprinting() ? 0.025999999f : 0.02f` | **NO** — hardcoded |
+| 3 | `jumpFromGround`'s sprint branch: flat `+0.2` blocks/tick forward | **NO** |
+
+plus `JUMP_STRENGTH` is a separate attribute, so vertical jumping is untouched at any
+level. **Slowness 255 leaves a player who can jump freely and bunny-hop away.** The
+ceiling is structural, not numeric.
+
+**What works is `Player.isImmobile()` — vanilla's own movement lock**, the one sleeping
+uses. In `LivingEntity.aiStep`, javap-verified by offset:
+
+```
+218:  applyInput()              // writes xxa / zza / jumping from the input source
+222:  if (isImmobile()) {
+230:      this.jumping = false;
+235:      this.xxa = 0.0f;      // strafe input
+240:      this.zza = 0.0f;      // forward input
+      }
+460:  jumpFromGround()          // gated on this.jumping
+516:  new Vec3(xxa, yya, zza) -> travel()
+```
+
+**It zeroes three fields and nothing else**, and the ordering is what makes it usable —
+after the input is read, before both consumers. **It closes all three leaks at once**:
+a zero input vector means `moveRelative` accelerates by nothing, so the airborne
+`getFlyingSpeed` branch has nothing to scale, and `jumping = false` means the `+0.2`
+impulse is never reached.
+
+**It is a MOVEMENT-only lock by construction, not by care.** Attack, mine and interact
+run off `Minecraft.handleKeybinds` / `MultiPlayerGameMode` and the attack/use packets —
+a path `aiStep`'s movement block never touches. That is why sleeping leaves them
+working, and the harness asserts each of the three permitted actions individually.
+
+**Target chain checked: `Player.isImmobile()` is the outermost override.**
+`LivingEntity` → `Avatar` → `Player`, and neither `ServerPlayer` nor `LocalPlayer`
+overrides it. No subclass trap.
+
+#### 1ag. ⚑ A PLAYER MOVEMENT LOCK MUST LIVE ON THE CLIENT — and vanilla's own says so
+`isImmobile`'s three fields only mean anything on the side that **simulates** the
+movement, and for a player that is the client: **`ServerPlayer` never writes `jumping`,
+`xxa` or `zza` at all** (zero `putfield`s), because positions arrive as movement packets.
+A server-only lock applies cleanly, changes nothing, and is CLAUDE.md failure mode 1 all
+over again.
+
+**Vanilla confirms the shape rather than contradicting it.**
+`ServerGamePacketListenerImpl.handleMovePlayer`, offsets 333-378:
+
+```java
+if (this.player.isSleeping()) {
+    if (distSqr > 1.0) this.teleport(player.getX(), player.getY(), player.getZ(), yRot, xRot);
+    return;
+}
+```
+
+a **deliberately generous** server-side backstop — a full block of slop — which works
+only because the client-side input lock already stopped the player trying. So the shipped
+design is two side-scoped mixins (`PlayerImmobileMixin` on `ServerLevel`,
+`ClientImmobileMixin` on `LocalPlayer`) plus `TremorLockPayload`.
+
+**The payload carries a DURATION, not a flag, and that is a failure-mode decision.** Two
+packets (`locked=true` / `locked=false`) would paralyse the player permanently if the
+second were lost. A duration expires by itself: the worst a lost packet can do is fail to
+start a lock, costing one tremor. Counted down in `ClientRunState`, cleared by `reset()`
+on disconnect, and ticked **before** the screen guard in `END_CLIENT_TICK` — pausing it
+while a GUI is open would leave the player rooted for as long as they had the inventory
+up.
+
+Splitting the gate across two mixins is safe here in a way Slippery Grip's pair were
+not: **both halves only ever answer `true` and neither removes anything**, so no
+ordering question exists. The scoping is discipline, not a fix.
+
+#### 1ah. ⚑ "BLIND FOR THE WHOLE WINDOW" IS NOT THE WINDOW'S LENGTH — overshoot by the fade
+The brief asked for blindness across the full 80-tick tremor. **Granting 80 does not
+deliver it, and the failure lands exactly on the hit the change exists to cover.**
+
+Two compounding off-by-somes, and the second is the interesting one:
+
+1. **`TREMOR_TICKS` is the index of the last tick, not a count.** `isFinished` is
+   `elapsed >= TREMOR_TICKS` and the tracker drops the tremor *on* that tick, so a
+   tremor occupies **81** ticks (0…80) with a hit on the first and last. A
+   `MobEffectInstance` of duration 80 is live for 0-79 and has already expired at the
+   closing hit. Hence `TREMOR_SPAN_TICKS = TREMOR_TICKS + 1`, and every duration in the
+   effect is measured from it.
+2. **The blindness fade is driven by REMAINING duration**, so a grant of `D` is at *full
+   darkness* only while `D - elapsed >= 20`.
+
+| grant | full darkness for | still live until | second hit (elapsed 80) blind? |
+|---|---|---|---|
+| 80 | elapsed 0-60 | 79 | **NO — expired entirely** |
+| 81 | elapsed 0-61 | 80 | **NO — fully faded out** |
+| **101** | **elapsed 0-81** | 100 | **YES, at full strength** |
+
+So the literal reading restores vision precisely in time for the closing half-heart —
+i.e. it reinstates the two-second reaction window the change exists to delete, just moved
+later. **`TREMOR_SPAN_TICKS + BLINDNESS_FADE_TICKS` is the smallest grant that means what
+was asked.** The fade constant now carries both of its roles explicitly: it is the floor
+below which a blindness is *entirely* fade, **and** the amount by which any grant must
+overshoot a window it must cover at full strength.
+
+`isBlinded` (grant live) and `isFullyBlinded` (at full darkness) are deliberately
+separate predicates — they disagree for exactly the final 20 ticks, and the whole point
+of the 101 is that both hits fall inside the *second* one.
+
+**Generalises to any effect whose client rendering reads `getDuration()`.** Ask what the
+*rendered* quantity does over the grant, not just when the grant ends.
+
+#### 1ai. The tier move: the same resolution as Unstable, reached independently
+Earthquake went **25-50 / `counterplay = true` → 40-60 / `counterplay = false`.**
+
+The old 40-tick blindness javadoc contained its own obituary: *"blinding through the
+whole window would make both hits unavoidable and quietly cost this effect its
+`counterplay = true`."* That is exactly what shipped, so **the flag moved with the
+blindness rather than being left behind** — which is the failure this project has hit
+three times (1k, 1q, 1s: a green harness asserting a stale specification).
+
+CLAUDE.md Part 2 forbids a `counterplay = false` effect below entropy 40, so the range
+had to move. **40-60 is Unstable's window, and Glass Cannon Pact's shape.** The harness
+check that used to assert `falseCount == 1` now asserts `== 2` **and** that *every*
+`counterplay = false` effect sits at 40-60 specifically — the point was never "only one
+may exist", it was that Unstable had no precedent to appeal to. Earthquake does.
+
+**The window itself has survived all four retunes** (Slowness II → III → IV →
+paralysis), and so have the tick-0/tick-80 hits. That is the pattern worth copying:
+raise severity *inside* the window and leave the window alone. Each retune's own ceiling
+argument is what stopped the duration drifting up alongside the strength — which is how
+a four-second annoyance becomes a ten-second punishment one step at a time.
+
+Mining Fatigue I rides along for the same span. Worth one note: **unlike Blindness, its
+amplifier is genuinely read** — vanilla registers an `ADD_MULTIPLIED_TOTAL` template on
+`BLOCK_BREAK_SPEED` — so amplifier 0 is a real level choice here, where for Blindness it
+is meaningless. The same literal `0` means two different things in one effect.
+
+---
+
 #### Harness note: an inlined `static final int` cannot be asserted by name
 The first draft asserted `classReferences(EarthquakeService, "PARTICLES_SMASH_ATTACK")`
 and failed. `LevelEvent.PARTICLES_SMASH_ATTACK` is a `static final int`, so **javac

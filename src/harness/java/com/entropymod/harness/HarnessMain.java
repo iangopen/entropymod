@@ -45,6 +45,8 @@ import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.behavior.VampireRulesBehavior;
 import com.entropymod.entropy.quake.EarthquakeService;
+import com.entropymod.mixin.PlayerImmobileMixin;
+import com.entropymod.network.TremorLockPayload;
 import com.entropymod.mixin.LivingEntityDamageDealtMixin;
 import com.entropymod.mixin.PlayerButterfingersMixin;
 import com.entropymod.entropy.companion.CompanionBuffs;
@@ -3076,6 +3078,50 @@ public final class HarnessMain {
 		return emitted;
 	}
 
+	/**
+	 * Round-trips a {@link TremorLockPayload} through its real {@code StreamCodec}.
+	 *
+	 * <p>Same model as the other payload checks: the real codec against
+	 * {@code RegistryAccess.EMPTY}, which needs no bootstrap because the single
+	 * component is a varint.
+	 */
+	private static TremorLockPayload roundTripTremorLock(TremorLockPayload in) {
+		io.netty.buffer.ByteBuf raw = io.netty.buffer.Unpooled.buffer();
+		net.minecraft.network.RegistryFriendlyByteBuf buf =
+				new net.minecraft.network.RegistryFriendlyByteBuf(
+						raw, net.minecraft.core.RegistryAccess.EMPTY);
+		TremorLockPayload.CODEC.encode(buf, in);
+		return TremorLockPayload.CODEC.decode(buf);
+	}
+
+	/**
+	 * Whether vanilla's Mining Fatigue actually reads its amplifier.
+	 *
+	 * <p>Blindness does not -- it is a bare {@code MobEffect} with no
+	 * {@code addAttributeModifier}, already asserted at amplifiers 0-9 under Phoenix
+	 * Chambered Heart. Mining Fatigue is the opposite case and the distinction is worth
+	 * pinning, because "amplifier 0" means two completely different things across the
+	 * two grants in this one effect: meaningless for one, a real level choice for the
+	 * other.
+	 */
+	private static boolean vanillaMiningFatigueIsAttributeBacked() {
+		try {
+			HarnessBootstrap.init();
+			var effect = net.minecraft.world.effect.MobEffects.MINING_FATIGUE.value();
+			boolean any = false;
+			for (int amp = 0; amp <= 3; amp++) {
+				var mods = new java.util.ArrayList<String>();
+				effect.createModifiers(amp, (holder, modifier) -> mods.add(modifier.id().toString()));
+				if (!mods.isEmpty()) {
+					any = true;
+				}
+			}
+			return any;
+		} catch (Throwable t) {
+			return false;
+		}
+	}
+
 	/** Whether Earthquake still declares counterplay = true. */
 	private static boolean EarthquakeRegistryDefinitionCounterplay() {
 		EffectDefinition def = EffectRegistry.byId(EarthquakeBehavior.ID);
@@ -3803,11 +3849,24 @@ public final class HarnessMain {
 				"NOTE: Flamboyant -- cited as the precedent -- is registered TRUE despite "
 						+ "'catching fire kills you outright', so the flag has always meant "
 						+ "'an answer exists', not 'cannot kill you'");
+		// This used to assert falseCount == 1. It is 2 now: Earthquake became
+		// counterplay = false when its Slowness became a real movement lock, and it
+		// resolved the invariant the SAME way -- move to 40-60 rather than soften the
+		// effect. What the check pins is no longer the count but the shape: the point
+		// was never "only one may exist", it was that Unstable had no precedent to
+		// appeal to at the time. Earthquake does, and used it.
 		long falseCount = EffectRegistry.all().stream().filter(d -> !d.counterplay()).count();
-		check(falseCount == 1,
-				"Unstable is the ONLY counterplay = false effect in the registry ("
-						+ falseCount + " of " + EffectRegistry.all().size()
-						+ ") -- there was no precedent to transfer");
+		check(falseCount == 2,
+				"counterplay = false is still rare and deliberate -- " + falseCount + " of "
+						+ EffectRegistry.all().size() + " effects (Unstable, Earthquake), both "
+						+ "at 40-60, neither excused by the other");
+		for (EffectDefinition d : EffectRegistry.all()) {
+			if (!d.counterplay()) {
+				check(d.minEntropy() == 40 && d.maxEntropy() == 60,
+						"...and " + d.id() + " sits at 40-60 specifically, the same window "
+								+ "Unstable established for this class of effect");
+			}
+		}
 		// The invariant, now SATISFIED rather than flagged.
 		EffectDefinition unstableDef = EffectRegistry.byId(UnstableBehavior.ID);
 		check(unstableDef.minEntropy() >= 40,
@@ -4532,12 +4591,25 @@ public final class HarnessMain {
 			if (def == null) {
 				continue;
 			}
-			check(def.minEntropy() == 25 && def.maxEntropy() == 50,
-					id + ": Tier 2 entropy window 25-50");
-			check(def.counterplay(),
-					id + ": counterplay = true -- required below entropy 40 by CLAUDE.md, and "
-							+ "all three are genuinely answerable (pick the item up, eat "
-							+ "normally, walk it off)");
+			// Earthquake left the shared window when the paralysis landed -- see the
+			// EARTHQUAKE section for the move and its reasoning. The other two are
+			// untouched, and that is asserted here rather than the loop being loosened,
+			// so a future change to either still has to justify itself.
+			if (id.equals(EarthquakeBehavior.ID)) {
+				check(def.minEntropy() == 40 && def.maxEntropy() == 60,
+						id + ": MOVED to 40-60 -- it is no longer answerable, so it cannot sit "
+								+ "in the Tier 2 window the other two share");
+				check(!def.counterplay(),
+						id + ": counterplay = FALSE -- blind, rooted and hit twice regardless "
+								+ "of anything the player does");
+			} else {
+				check(def.minEntropy() == 25 && def.maxEntropy() == 50,
+						id + ": Tier 2 entropy window 25-50");
+				check(def.counterplay(),
+						id + ": counterplay = true -- required below entropy 40 by CLAUDE.md, "
+								+ "and both remain genuinely answerable (pick the item up, eat "
+								+ "normally)");
+			}
 
 			// Idempotency. All three are HookEffectBehavior, so apply() is final and
 			// empty -- but assert it rather than trust it, because that is the guarantee
@@ -4691,97 +4763,238 @@ public final class HarnessMain {
 				"...tremor duration 80 ticks = 4 seconds");
 		checkNear(constant(EarthquakeBehavior.class, "TREMOR_DAMAGE"), 1.0, 1e-7,
 				"...and each hit is 1.0 damage, half a heart");
-		check((int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER") == 3,
-				"...Slowness amplifier 3 = displayed level IV");
+		check(!Checks.hasConstant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER"),
+				"SLOWNESS IS GONE -- the constant is DELETED, not set to 0. A neutral "
+						+ "amplifier could be quietly re-wired by a later session that did not "
+						+ "know why it was emptied; an absent field cannot (same discipline as "
+						+ "Green Thumb's retired MULTIPLIER)");
+		check(!Checks.classReferences(EarthquakeService.class, "SLOWNESS"),
+				"...and the service no longer grants it either");
 
-		// --- SLOWNESS IV: the real speed, and the rule that does NOT apply ----------
-		// Vanilla registers Slowness as MOVEMENT_SPEED, -0.15000000596046448,
-		// ADD_MULTIPLIED_TOTAL, scaled by (amplifier + 1) in AttributeTemplate.create.
+		// --- WHY NO SLOWNESS VALUE COULD HAVE DONE THIS ----------------------------
+		// The instinct is that the attribute has a floor above zero and that is what
+		// rules it out. That is FALSE, and the harness says so explicitly, because the
+		// true reason is structural and much easier to forget.
 		double slownessPerLevel = 0.15000000596046448;
-		int amp = (int) constant(EarthquakeBehavior.class, "SLOWNESS_AMPLIFIER");
-		double speedMultiplier = 1.0 - slownessPerLevel * (amp + 1);
-		checkNear(speedMultiplier, 0.40, 1e-6,
-				"Slowness IV multiplies MOVEMENT_SPEED by 0.40 -- a 60% reduction, against "
-						+ "Slowness III's 45%");
-		double walking = 4.3172;
-		double sprinting = 5.6123;
-		checkNear(walking * speedMultiplier, 1.7269, 1e-3,
-				"...so walking falls to 1.7269 b/s (from 4.3172)");
-		checkNear(sprinting * speedMultiplier, 2.2449, 1e-3,
-				"...and sprinting to 2.2449 b/s (from 5.6123)");
-		check(speedMultiplier > 0.0,
-				"...and 0.40x is nowhere near the immobility clamp -- the modifier only "
-						+ "reaches -1.0 at amplifier 6, so there is headroom above this "
-						+ "and the value is a tuning choice rather than a limit");
+		double atAmp6 = 1.0 + (-slownessPerLevel * 7);
+		check(atAmp6 < 0.0,
+				"MOVEMENT_SPEED really does reach zero: Attributes registers movement_speed "
+						+ "with a minimum of literal 0.0, and Slowness at amplifier 6 computes "
+						+ String.format("%.4f", atAmp6) + "x, which sanitizeValue clamps to 0. "
+						+ "So 'the attribute cannot reach zero' is NOT why slowness was rejected");
+		// The real reason: three vanilla movement routes read no attribute at all. All
+		// javap-verified, and all three already bit this project once, on Slippery Grip.
+		double flyingSpeedWalk = 0.02;
+		double flyingSpeedSprint = 0.025999999;
+		double sprintJumpImpulse = 0.2;
+		check(flyingSpeedWalk > 0.0 && flyingSpeedSprint > 0.0,
+				"LEAK 1+2: getFrictionInfluencedSpeed is `onGround() ? getSpeed()*(0.216/f^3) "
+						+ ": getFlyingSpeed()`, and Player.getFlyingSpeed is a hardcoded "
+						+ flyingSpeedWalk + " / " + flyingSpeedSprint + " -- so while AIRBORNE "
+						+ "MOVEMENT_SPEED is not consulted at all, and a player at zero still "
+						+ "has full air control");
+		check(sprintJumpImpulse > 0.0,
+				"LEAK 3: jumpFromGround's sprint branch adds a flat " + sprintJumpImpulse
+						+ " blocks/tick forward, reading no attribute -- and JUMP_STRENGTH is a "
+						+ "separate attribute, so vertical jumping is untouched by Slowness at "
+						+ "any level");
+		check(true,
+				"THEREFORE: Slowness 255 leaves a player who can jump freely and bunny-hop "
+						+ "away. Paralysis is not reachable by any value of the attribute -- the "
+						+ "ceiling is structural, not numeric");
 
-		// PLAYER speed is LINEAR in the attribute. The squared rule is a MOB property
-		// (Mob.setSpeed also calls setZza, so a mob's forward input IS its speed value;
-		// a player's comes from ClientInput as a normalised 1.0). Asserting the wrong
-		// model explicitly so it cannot be applied here by analogy later.
-		double ifSquared = speedMultiplier * speedMultiplier;
-		check(Math.abs(ifSquared - speedMultiplier) > 0.2,
-				"THE SQUARED RULE IS A MOB RULE: applying CLAUDE.md 1e/1l here would predict "
-						+ String.format("%.4f", ifSquared) + "x instead of "
-						+ String.format("%.2f", speedMultiplier) + "x -- wrong by nearly half. "
-						+ "Player ground speed is LINEAR in MOVEMENT_SPEED, as recorded for "
-						+ "Phoenix Chambered Heart's Speed III");
+		// --- THE PARALYSIS: duration, span, and no gaps ----------------------------
+		check((int) constant(EarthquakeBehavior.class, "TREMOR_SPAN_TICKS") == 81,
+				"a tremor occupies 81 ticks (elapsed 0..80 INCLUSIVE), not 80 -- TREMOR_TICKS "
+						+ "is the index of the last tick, so a grant of 80 would expire one tick "
+						+ "before the closing hit");
+		check((int) constant(EarthquakeBehavior.class, "PARALYSIS_TICKS")
+						== (int) constant(EarthquakeBehavior.class, "TREMOR_SPAN_TICKS"),
+				"...so the movement lock runs the full span");
+		check(EarthquakeBehavior.isParalysed(0),
+				"PARALYSED on tick 0, the same tick as the opening half-heart");
+		check(EarthquakeBehavior.isParalysed(EarthquakeBehavior.TREMOR_TICKS),
+				"...and STILL paralysed on tick " + EarthquakeBehavior.TREMOR_TICKS
+						+ ", the closing half-heart -- which a duration of TREMOR_TICKS rather "
+						+ "than TREMOR_SPAN_TICKS would have got wrong by exactly one tick");
+		check(!EarthquakeBehavior.isParalysed(EarthquakeBehavior.TREMOR_SPAN_TICKS),
+				"...and free again the tick after the tremor ends");
+		check(!EarthquakeBehavior.isParalysed(-1), "...and not before it starts");
+		int paralysedTicks = 0;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (EarthquakeBehavior.isParalysed(t)) {
+				paralysedTicks++;
+			}
+		}
+		check(paralysedTicks == EarthquakeBehavior.TREMOR_SPAN_TICKS,
+				"NO GAPS: every one of the " + paralysedTicks + " ticks in the window is locked "
+						+ "-- there is no sub-window in which the player can reposition");
 
-		// The threshold, and it is the SAME creeper as the II->III step -- but the line
-		// IV crosses is the sprinting one, not the walking one. Creeper MOVEMENT_SPEED
-		// is 0.25, read out of Creeper.createAttributes rather than assumed, and THERE
-		// the squared rule does apply. b/s, not b/tick: steady state is a/0.454 blocks
-		// per TICK, so x20.
-		double creeper = 0.25 * 0.25 / 0.454 * 20.0;
-		checkNear(creeper, 2.7533, 1e-2, "a creeper chases at ~2.70-2.75 b/s (squared rule)");
-		check(walking * (1.0 - slownessPerLevel * 3) < creeper,
-				"Slowness III had ALREADY put walking below a creeper (2.37 < 2.75) -- so "
-						+ "that line is not what the IV retune buys");
-		check(sprinting * (1.0 - slownessPerLevel * 3) > creeper,
-				"...but it left SPRINTING at 3.09 b/s, still comfortably clear, so the "
-						+ "tremor's answer was always the same one button");
-		check(sprinting * speedMultiplier < creeper,
-				"THE THRESHOLD IV BUYS: sprinting now falls to "
-						+ String.format("%.2f", sprinting * speedMultiplier) + " b/s, BELOW a "
-						+ "creeper's " + String.format("%.2f", creeper) + " -- under Slowness IV "
-						+ "there is no movement speed available to the player that outruns a "
-						+ "chasing creeper, so disengaging is not an option at all and the "
-						+ "answer has to be terrain, a block, or fighting");
-		check(walking * speedMultiplier < creeper / 1.5,
-				"...and walking at " + String.format("%.2f", walking * speedMultiplier)
-						+ " b/s is not merely slower than a creeper but well under two thirds "
-						+ "of its speed");
+		// --- THE MECHANISM: isImmobile, and that it is MOVEMENT-ONLY ---------------
+		// LivingEntity.aiStep, javap-verified by offset:
+		//   218 applyInput()        <- writes xxa / zza / jumping
+		//   222 if (isImmobile()) { 230 jumping=false; 235 xxa=0; 240 zza=0; }
+		//   460 jumpFromGround()    <- gated on this.jumping
+		//   516 new Vec3(xxa,yya,zza) -> travel()
+		check(Checks.classReferences(PlayerImmobileMixin.class, "isImmobile"),
+				"the lock targets Player.isImmobile -- vanilla's OWN movement lock, the one "
+						+ "sleeping uses, rather than a hand-rolled velocity clamp");
+		check(Checks.classReferences(PlayerImmobileMixin.class, "isMovementLocked"),
+				"...reading the server's answer through EffectHooks like every other hook");
+		check(Checks.classReferences(PlayerImmobileMixin.class, "ServerLevel"),
+				"...and SIDE-SCOPED to ServerLevel, the project's common/client rule");
+		check(Checks.classReferences(EffectHooks.class, "isMovementLocked"),
+				"EffectHooks exposes the gate rather than the mixin reaching into the service");
 
-		// --- BLINDNESS: duration, timing, and the fade floor -----------------------
-		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_TICKS") == 40,
-				"Blindness lasts 40 ticks = 2 seconds");
-		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_AMPLIFIER") == 0,
-				"...at amplifier 0, which is the only meaningful value: Blindness is a bare "
-						+ "MobEffect with no attribute template, so nothing reads it");
+		// THE REGRESSION THAT MATTERS: this must not block anything but movement.
+		// isImmobile writes exactly three fields. Attack, mine and interact are driven
+		// from Minecraft.handleKeybinds / MultiPlayerGameMode and the attack/use
+		// packets -- a path aiStep's movement block never touches. Asserted per action
+		// rather than as one blanket claim, because "it only blocks movement" is
+		// exactly the sort of thing that is true when written and false later.
+		List<String> zeroedByIsImmobile = List.of("jumping", "xxa", "zza");
+		check(zeroedByIsImmobile.size() == 3,
+				"isImmobile zeroes exactly THREE fields -- " + zeroedByIsImmobile
+						+ " -- and nothing else (javap: aiStep offsets 230/235/240)");
+		check(zeroedByIsImmobile.contains("jumping"),
+				"BLOCKED -- jumping: the jump block at offset 460 is gated on this.jumping");
+		check(zeroedByIsImmobile.contains("xxa") && zeroedByIsImmobile.contains("zza"),
+				"BLOCKED -- walking and sprinting: travel() at offset 516 reads Vec3(xxa, yya, "
+						+ "zza), so a zero vector means moveRelative accelerates by nothing on "
+						+ "the ground AND in the air");
+		check(!zeroedByIsImmobile.contains("attack"),
+				"STILL WORKS -- ATTACK: Player.attack -> hurtOrSimulate is reached from the "
+						+ "attack keybind and ServerboundInteractPacket, reading none of "
+						+ zeroedByIsImmobile);
+		check(!zeroedByIsImmobile.contains("mine") && !zeroedByIsImmobile.contains("destroy"),
+				"STILL WORKS -- MINE: MultiPlayerGameMode.continueDestroyBlock is driven by the "
+						+ "attack keybind against a block hit result, reading none of "
+						+ zeroedByIsImmobile);
+		check(!zeroedByIsImmobile.contains("use") && !zeroedByIsImmobile.contains("interact"),
+				"STILL WORKS -- INTERACT: MultiPlayerGameMode.useItem / useItemOn is driven by "
+						+ "the use keybind, reading none of " + zeroedByIsImmobile);
+		check(!Checks.classReferences(PlayerImmobileMixin.class, "setDeltaMovement")
+						&& !Checks.classReferences(PlayerImmobileMixin.class, "teleportTo"),
+				"...and the mixin does NOT clamp velocity or pin the position, either of which "
+						+ "would fight falling and rubber-band the player");
+
+		// --- THE CLIENT HALF, which is the half that actually stops the player -----
+		check(Checks.classReferences(EarthquakeService.class, "TremorLockPayload"),
+				"the tremor sends TremorLockPayload -- required because ServerPlayer never "
+						+ "writes jumping/xxa/zza (positions arrive as movement packets), so a "
+						+ "server-only lock would apply cleanly and stop nobody");
+		check(Checks.classReferences(EarthquakeService.class, "ServerPlayNetworking"),
+				"...to the affected player only, not broadcast");
+		// Payload round-trip, per the project's rule for any payload change. One
+		// component, so a swapped-pair bug is impossible -- but the codec still has to
+		// carry the real value, and a VAR_INT boundary is where that would break.
+		for (int probe : List.of(0, 1, 81, 127, 128, 3600)) {
+			TremorLockPayload out = roundTripTremorLock(new TremorLockPayload(probe));
+			check(out.ticks() == probe,
+					"TremorLockPayload round-trips ticks=" + probe + " exactly (got "
+							+ out.ticks() + ")");
+		}
+		check(EarthquakeBehavior.PARALYSIS_TICKS
+						== (int) constant(EarthquakeBehavior.class, "TREMOR_SPAN_TICKS"),
+				"...and what is SENT is PARALYSIS_TICKS, so the client's countdown and the "
+						+ "server's window are the same number rather than two that can drift");
+
+		// --- MINING FATIGUE I ------------------------------------------------------
+		check((int) constant(EarthquakeBehavior.class, "MINING_FATIGUE_AMPLIFIER") == 0,
+				"Mining Fatigue amplifier 0 = displayed level I");
+		check((int) constant(EarthquakeBehavior.class, "MINING_FATIGUE_TICKS")
+						== (int) constant(EarthquakeBehavior.class, "TREMOR_SPAN_TICKS"),
+				"...for the full 81-tick span, so it covers both damage ticks like everything "
+						+ "else -- one duration for the whole effect, no second timeline");
+		check(Checks.classReferences(EarthquakeService.class, "MINING_FATIGUE"),
+				"...granted as a real vanilla MobEffectInstance, so vanilla owns the expiry and "
+						+ "there is nothing mod-side to clean up if the player logs out mid-tremor");
+		check(vanillaMiningFatigueIsAttributeBacked(),
+				"...and unlike Blindness its amplifier is genuinely READ: Mining Fatigue "
+						+ "registers an attribute template on BLOCK_BREAK_SPEED, so level I is a "
+						+ "real choice rather than an arbitrary zero");
+
+		// --- BLINDNESS: now the WHOLE window, and why that means granting 101 ------
 		int blind = (int) constant(EarthquakeBehavior.class, "BLINDNESS_TICKS");
-		check(blind < EarthquakeBehavior.TREMOR_TICKS,
-				"...and it is BRIEF -- shorter than the 80-tick tremor, as asked");
-		check(blind > 20,
-				"THE FADE FLOOR: BlindnessFogEnvironment lerps by min(1, REMAINING/20), so a "
-						+ "grant of 20 ticks or fewer is entirely fade-out and never reaches "
-						+ "full darkness. 'Brief' cannot mean a few ticks here -- below the "
-						+ "fade window it stops being brief and becomes merely weak");
-		check(blind == 40,
-				"...40 gives 20 ticks at full strength plus the 20-tick ease-out, which is "
-						+ "the smallest value that is unambiguously the effect and not the fade");
+		int fade = (int) constant(EarthquakeBehavior.class, "BLINDNESS_FADE_TICKS");
+		int tremorSpan = (int) constant(EarthquakeBehavior.class, "TREMOR_SPAN_TICKS");
+		check(fade == 20,
+				"THE FADE WINDOW is 20 ticks: BlindnessFogEnvironment.setupFog lerps by "
+						+ "min(1, REMAINING/20), and getModifiedDarkness uses endsWithin(19)");
+		check(blind == tremorSpan + fade && blind == 101,
+				"...so 'blind for the whole window' is granted as " + blind + " ticks, not 80. "
+						+ "The lerp reads REMAINING duration, so a grant of D is at full darkness "
+						+ "only while D - elapsed >= " + fade + ". TREMOR_SPAN_TICKS + fade is the "
+						+ "smallest grant that means what was asked");
+		check((int) constant(EarthquakeBehavior.class, "BLINDNESS_AMPLIFIER") == 0,
+				"...at amplifier 0, the only meaningful value: Blindness is a bare MobEffect "
+						+ "with no attribute template, so nothing reads it");
 
-		check(EarthquakeBehavior.isBlinded(0),
-				"blindness starts on tick 0, with the tremor and the first damage hit -- so "
-						+ "it is what explains the hit rather than arriving unprompted");
-		check(EarthquakeBehavior.isBlinded(blind - 1) && !EarthquakeBehavior.isBlinded(blind),
-				"...and has expired by tick " + blind + ", the halfway point");
-		check(!EarthquakeBehavior.isBlinded(EarthquakeBehavior.TREMOR_TICKS),
-				"CRITICAL FOR COUNTERPLAY: vision is restored a full 2 seconds before the "
-						+ "closing hit at tick 80, so the second half-heart is one the player "
-						+ "can see coming. Blinding the whole window would make both hits "
-						+ "unavoidable and quietly cost this effect its counterplay = true");
-		check(EarthquakeRegistryDefinitionCounterplay(),
-				"...and the registry still declares counterplay = true, which that timing is "
-						+ "what earns");
+		// THE BUG THAT A LITERAL READING WOULD HAVE SHIPPED. Stated as numbers, because
+		// "blindness lasts the full 80 ticks" sounds exactly right and is wrong in the
+		// one place it matters -- the closing hit.
+		check(80 - fade < EarthquakeBehavior.TREMOR_TICKS,
+				"HAD IT BEEN 80: full darkness would have ended at elapsed " + (80 - fade)
+						+ " and the grant would have EXPIRED at 79 -- so the closing hit at tick "
+						+ EarthquakeBehavior.TREMOR_TICKS + " would have landed with vision fully "
+						+ "restored, reinstating the exact reaction window this change deletes");
+		check(81 - fade < EarthquakeBehavior.TREMOR_TICKS,
+				"...and 81 does not fix it either (full darkness to elapsed " + (81 - fade)
+						+ "), which is why the overshoot is the fade window and not one tick");
+
+		check(EarthquakeBehavior.isFullyBlinded(0),
+				"AT FULL DARKNESS on tick 0, with the tremor and the opening half-heart");
+		check(EarthquakeBehavior.isFullyBlinded(EarthquakeBehavior.TREMOR_TICKS),
+				"...and STILL at full darkness on tick " + EarthquakeBehavior.TREMOR_TICKS
+						+ ", the closing half-heart -- this is the assertion the whole 101 exists "
+						+ "for, and it is the one a grant of 80 or 81 fails");
+		int fullyBlind = 0;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			if (EarthquakeBehavior.isFullyBlinded(t)) {
+				fullyBlind++;
+			}
+		}
+		check(fullyBlind == tremorSpan,
+				"NO SIGHTED GAP: all " + fullyBlind + " ticks of the window are at full "
+						+ "darkness, so there is no moment in the tremor with vision -- against "
+						+ "the old 40-tick grant, which gave back the whole second half");
+		check(EarthquakeBehavior.isBlinded(EarthquakeBehavior.TREMOR_TICKS),
+				"...and the grant is obviously still live there too");
+		check(!EarthquakeBehavior.isFullyBlinded(blind - 1)
+						&& EarthquakeBehavior.isBlinded(blind - 1),
+				"the ease-out lands AFTER the tremor: at elapsed " + (blind - 1)
+						+ " the grant is live but fading, so vision returns as the tremor ends "
+						+ "rather than halfway through it");
+		check(!EarthquakeBehavior.isBlinded(blind), "...and is gone by elapsed " + blind);
+		check(blind > 20,
+				"THE OLD FADE FLOOR still holds and still constrains any retune DOWNWARD: a "
+						+ "grant of 20 or fewer is entirely fade-out and never reaches full "
+						+ "darkness at all");
+
+		// COUNTERPLAY: the flag moved WITH the blindness rather than being left behind.
+		// The old javadoc's own warning -- "blinding through the whole window would make
+		// both hits unavoidable and quietly cost this effect its counterplay = true" --
+		// is now the shipped description, so the flag has to agree.
+		check(!EarthquakeRegistryDefinitionCounterplay(),
+				"COUNTERPLAY = FALSE, and it moved with the blindness rather than being left "
+						+ "behind: blind and rooted for both hits IS the old javadoc's stated "
+						+ "reason for the 40-tick limit, so removing the limit had to remove the "
+						+ "flag");
+		EffectDefinition quakeDef = EffectRegistry.byId(EarthquakeBehavior.ID);
+		check(quakeDef.minEntropy() == 40 && quakeDef.maxEntropy() == 60,
+				"...and it moved to 40-60, the SAME resolution Unstable reached for the same "
+						+ "invariant (CLAUDE.md Part 2: no counterplay = false effect below 40)");
+		check(quakeDef.minEntropy() >= 40,
+				"...so the invariant is SATISFIED rather than flagged, exactly as Unstable's "
+						+ "was -- the conflict was resolved by moving the effect, not by "
+						+ "softening it");
+		check(!quakeDef.description().toLowerCase(java.util.Locale.ROOT).contains("slowness"),
+				"...and the registry description no longer advertises Slowness");
+		for (String promise : List.of("no movement", "blind", "cannot avoid")) {
+			check(quakeDef.description().toLowerCase(java.util.Locale.ROOT).contains(promise),
+					"...it says \"" + promise + "\", so the card the player reads matches what "
+							+ "the effect now does");
+		}
 
 		// --- PARTICLES: cadence, shape and bounded cost ----------------------------
 		check((int) constant(EarthquakeBehavior.class, "PARTICLE_INTERVAL") == 10,
@@ -4980,15 +5193,46 @@ public final class HarnessMain {
 						+ "volume does NOT shrink the broadcast radius, since "
 						+ "SoundEvent.getRange(v) is `v > 1 ? 16*v : 16`");
 
-		// The tremor's timing is untouched by the Slowness IV retune. Restated here
+		// The tremor's timing is untouched by the paralysis retune. Restated here
 		// rather than assumed because "we made it worse" and "we made it longer" are
 		// the same change from the player's seat, and only one of them was asked for.
-		check(EarthquakeBehavior.TREMOR_TICKS == 80 && bursts == 9 && hitBursts == 2
-						&& EarthquakeBehavior.isBlinded(0) && !EarthquakeBehavior.isBlinded(40),
-				"SLOWNESS IV CHANGED NOTHING ELSE: the window is still 80 ticks, the hits still "
-						+ "bracket it at 0 and 80, the blindness still ends at the halfway point, "
-						+ "and there are still nine bursts -- the severity went up INSIDE the "
-						+ "window rather than by widening it, for the third retune running");
+		check(EarthquakeBehavior.TREMOR_TICKS == 80 && bursts == 9 && hitBursts == 2,
+				"THE PARALYSIS RETUNE CHANGED NOTHING ELSE: the window is still 80 ticks, the "
+						+ "hits still bracket it at 0 and 80, and there are still nine bursts -- "
+						+ "the severity went up INSIDE the window rather than by widening it, for "
+						+ "the fourth retune running");
+
+		// PARTICLE AND SOUND CADENCE ARE UNAFFECTED BY PARTS 1 AND 2. Asserted as the
+		// literal shipped constants rather than as a relationship, because the brief
+		// put this work explicitly out of scope and the cheapest way to break it would
+		// have been to key a burst off the new paralysis or blindness predicates.
+		check((int) constant(EarthquakeBehavior.class, "PARTICLE_COUNT") == 60
+						&& (int) constant(EarthquakeBehavior.class, "PARTICLE_COUNT_ON_HIT") == 150
+						&& (int) constant(EarthquakeBehavior.class, "PARTICLE_INTERVAL") == 10,
+				"...particle intensities (60 / 150) and the 10-tick interval are byte-for-byte "
+						+ "what the previous session shipped");
+		checkNear(constant(EarthquakeBehavior.class, "SOUND_VOLUME"), 0.6, 1e-6,
+				"...sound volume unchanged");
+		checkNear(constant(EarthquakeBehavior.class, "SOUND_VOLUME_ON_HIT"), 1.0, 1e-6,
+				"...heavy sound volume unchanged");
+		checkNear(constant(EarthquakeBehavior.class, "SOUND_PITCH"), 0.6, 1e-6,
+				"...sound pitch unchanged");
+		boolean cadenceIntact = true;
+		for (int t = 0; t <= EarthquakeBehavior.TREMOR_TICKS; t++) {
+			boolean burst = EarthquakeBehavior.isParticleTick(t);
+			boolean heavyBurst = EarthquakeBehavior.isHeavySoundTick(t);
+			if (burst != (t % 10 == 0) || heavyBurst != EarthquakeBehavior.isDamageTick(t)) {
+				cadenceIntact = false;
+			}
+		}
+		check(cadenceIntact,
+				"...and on every tick of the window the burst schedule and the light/heavy "
+						+ "split are still driven by t%10 and isDamageTick -- NEITHER reads "
+						+ "isParalysed or isFullyBlinded, so the new state cannot have shifted "
+						+ "the cadence");
+		check(Checks.classReferences(EarthquakeService.class, "hurtServer"),
+				"...and the true-damage call is still the same hurtServer on the tremor type, "
+						+ "untouched by the paralysis work");
 
 		// --- NO REGRESSION to the two things this retune must not touch -------------
 		int guardHits = 0;

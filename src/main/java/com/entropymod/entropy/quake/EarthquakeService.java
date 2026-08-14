@@ -6,6 +6,8 @@ import com.entropymod.entropy.EntropyDamageTypes;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.spawn.SpawnSchedule;
+import com.entropymod.network.TremorLockPayload;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -112,22 +114,44 @@ public final class EarthquakeService {
 		ACTIVE.clear();
 	}
 
+	/**
+	 * Whether this player is inside a tremor and therefore rooted, server-side.
+	 *
+	 * <p>Read by {@code PlayerImmobileMixin} through
+	 * {@code EffectHooks.isMovementLocked}. This is the server's own answer; the client
+	 * keeps its own countdown from {@code TremorLockPayload} and the two are read by
+	 * side-scoped mixins, exactly as Slippery Grip's pair are.
+	 *
+	 * <p>Absent means no tremor, so a player without the effect costs one hash miss.
+	 */
+	public static boolean isTremorActive(UUID playerId) {
+		Integer elapsed = ACTIVE.get(playerId);
+		return elapsed != null && EarthquakeBehavior.isParalysed(elapsed);
+	}
+
 	// ==================================================================
 
 	private static void beginTremor(ServerPlayer player, UUID id) {
-		// Slowness for exactly the tremor, granted as a real MobEffectInstance so it
-		// expires on vanilla's own schedule with nothing mod-side to clean up -- the
-		// same reason Phoenix Chambered Heart grants real effects instead of imitating
-		// them. showParticles is left on: the player should be able to see why they
-		// are slow.
-		player.addEffect(new MobEffectInstance(MobEffects.SLOWNESS,
-				EarthquakeBehavior.TREMOR_TICKS, EarthquakeBehavior.SLOWNESS_AMPLIFIER));
-		// Blindness for HALF the window, granted once here rather than re-applied per
-		// tick. Its own duration is what drives the client's fog lerp -- refreshing it
-		// every tick would pin the remaining duration at 40 and delete the 20-tick
-		// ease-out that makes it read as recovering rather than as switching off.
+		// Blindness for the WHOLE window, granted once here rather than re-applied per
+		// tick. Its own remaining duration is what drives the client's fog lerp, so
+		// refreshing it every tick would pin the remaining value and delete the
+		// ease-out -- and the overshoot that keeps the closing hit at full darkness
+		// (see EarthquakeBehavior.BLINDNESS_TICKS) is expressed entirely in this one
+		// number. Refreshing would silently destroy it.
 		player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS,
 				EarthquakeBehavior.BLINDNESS_TICKS, EarthquakeBehavior.BLINDNESS_AMPLIFIER));
+		// Mining Fatigue I for the window. A real MobEffectInstance for the same reason
+		// as the blindness: vanilla owns the expiry, so there is no mod-side timer and
+		// nothing to clean up if the player logs out mid-tremor.
+		player.addEffect(new MobEffectInstance(MobEffects.MINING_FATIGUE,
+				EarthquakeBehavior.MINING_FATIGUE_TICKS,
+				EarthquakeBehavior.MINING_FATIGUE_AMPLIFIER));
+		// The movement lock. Server-side ACTIVE is what Player.isImmobile() reads here;
+		// the packet is what lets the CLIENT's copy of that mixin zero the real input,
+		// which is the half that actually stops the player. See TremorLockPayload for
+		// why this cannot be done server-side alone.
+		ServerPlayNetworking.send(player,
+				new TremorLockPayload(EarthquakeBehavior.PARALYSIS_TICKS));
 		ACTIVE.put(id, 0);
 		// Tick 0 is a damage tick, so the opening hit lands on the same tick the
 		// Slowness does -- see EarthquakeBehavior.DAMAGE_TICKS for why the hits bracket

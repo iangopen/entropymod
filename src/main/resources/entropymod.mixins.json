@@ -25,6 +25,7 @@
 		"PlayerExhaustionMixin",
 		"PlayerExperienceMixin",
 		"PlayerFlyingSpeedMixin",
+		"PlayerImmobileMixin",
 		"PlayerItemPickupMixin",
 		"ServerPlayerDamageMixin",
 		"ServerPlayerJumpMixin",

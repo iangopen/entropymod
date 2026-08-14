@@ -14,6 +14,7 @@ import com.entropymod.entropy.spawn.CreeperMagnetSpawner;
 import com.entropymod.entropy.spawn.UnstableSpawner;
 import com.entropymod.network.ChoiceMadePayload;
 import com.entropymod.network.ClientEffectsPayload;
+import com.entropymod.network.TremorLockPayload;
 import com.entropymod.network.HistoryRequestPayload;
 import com.entropymod.network.HistoryResponsePayload;
 import com.entropymod.network.KeybindSnapshotPayload;
@@ -60,6 +61,9 @@ public class EntropyMod implements ModInitializer {
 		// Tier 2's client-side effects need to know which effects the run holds --
 		// see ClientEffectsPayload. Nothing before Tier 2 required this.
 		PayloadTypeRegistry.clientboundPlay().register(ClientEffectsPayload.TYPE, ClientEffectsPayload.CODEC);
+		// Earthquake's per-tremor movement lock -- see TremorLockPayload for why the
+		// client has to be told, and why it carries a duration rather than a flag.
+		PayloadTypeRegistry.clientboundPlay().register(TremorLockPayload.TYPE, TremorLockPayload.CODEC);
 		// Run lifecycle: the state gate and the per-player keybind snapshot that
 		// Randomized Movement Controls is anchored to.
 		PayloadTypeRegistry.clientboundPlay().register(RunSyncPayload.TYPE, RunSyncPayload.CODEC);

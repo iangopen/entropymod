@@ -8,6 +8,7 @@ import com.entropymod.entropy.RerollState;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.entropy.RunState;
 import com.entropymod.network.ClientEffectsPayload;
+import com.entropymod.network.TremorLockPayload;
 import com.entropymod.network.HistoryRequestPayload;
 import com.entropymod.network.HistoryResponsePayload;
 import com.entropymod.network.KeybindSnapshotPayload;
@@ -62,6 +63,13 @@ public class EntropyModClient implements ClientModInitializer {
 			ClientRunState.update(payload.effectIds(), payload.moveScramble());
 			EntropyMod.LOGGER.info("Client effects synced: {} effect(s), scramble '{}'",
 					payload.effectIds().size(), payload.moveScramble());
+		});
+
+		// Earthquake's movement lock. A pulse rather than state: the tremor is a
+		// server-side schedule the client cannot derive, and the client is the only
+		// side that can actually stop the player -- see TremorLockPayload.
+		ClientPlayNetworking.registerGlobalReceiver(TremorLockPayload.TYPE, (payload, context) -> {
+			ClientRunState.beginTremorLock(payload.ticks());
 		});
 
 		// Run lifecycle. One payload drives three decisions -- see RunSyncPayload.
@@ -158,6 +166,11 @@ public class EntropyModClient implements ClientModInitializer {
 			// cannot be registered through a GUI anyway.
 			ClientDoubleJump.tick(client.player);
 			OreSenseScan.tick(client.player);
+			// Also before the screen guard, and for a sharper reason than Double
+			// Jump's: this is a countdown the server started, so pausing it while a
+			// GUI is open would leave the player paralysed for however long they had
+			// the inventory up. A lock must expire on wall-clock ticks or not at all.
+			ClientRunState.tickTremorLock();
 			if (client.screen != null) {
 				return;
 			}

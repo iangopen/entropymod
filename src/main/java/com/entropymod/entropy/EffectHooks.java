@@ -7,7 +7,9 @@ import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
 import com.entropymod.entropy.behavior.BeastWhispererBehavior;
 import com.entropymod.entropy.behavior.ClumsyDiggerBehavior;
 import com.entropymod.entropy.behavior.CrouchInvincibilityBehavior;
+import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.behavior.FlamboyantBehavior;
+import com.entropymod.entropy.quake.EarthquakeService;
 import com.entropymod.entropy.behavior.SlashedPocketsBehavior;
 import com.entropymod.entropy.behavior.GreenThumbBehavior;
 import com.entropymod.entropy.behavior.LeakyPocketsBehavior;
@@ -306,6 +308,35 @@ public final class EffectHooks {
 		return acquired != null
 				&& acquired.contains(SlashedPocketsBehavior.ID)
 				&& SlashedPocketsBehavior.isLocked(slot);
+	}
+
+	/**
+	 * True if this player is rooted in place by an Earthquake tremor
+	 * (server side only). Read by {@code PlayerImmobileMixin}.
+	 *
+	 * <p><b>This is the SERVER's half of the answer and nothing else.</b> The client
+	 * keeps its own countdown in {@code ClientRunState}, fed by
+	 * {@code TremorLockPayload}, and reads it from {@code ClientImmobileMixin}. The two
+	 * halves are side-scoped rather than sharing a source for the reason this whole
+	 * class exists -- {@code EffectHooks} lives in the main source set and cannot see
+	 * the client one, and the acquired set does not exist client-side at all.
+	 *
+	 * <p>Splitting it is safe here in a way it was not for Slippery Grip: both halves
+	 * only ever answer <em>true</em>, never remove anything, so there is no ordering
+	 * question even if both somehow ran. The scoping is the project's rule rather than a
+	 * correctness requirement in this instance.
+	 *
+	 * <p>Returns false client-side, like every other hook here, which is exactly why the
+	 * client half exists.
+	 */
+	public static boolean isMovementLocked(Player player) {
+		if (!(player.level() instanceof ServerLevel)) {
+			return false;
+		}
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null
+				&& acquired.contains(EarthquakeBehavior.ID)
+				&& EarthquakeService.isTremorActive(player.getUUID());
 	}
 
 	/** True if this player has Slashed Pockets at all. Cheap gate for the per-tick sweep. */
