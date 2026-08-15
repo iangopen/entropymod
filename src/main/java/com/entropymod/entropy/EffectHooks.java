@@ -32,6 +32,10 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityReference;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.tags.DamageTypeTags;
@@ -198,11 +202,48 @@ public final class EffectHooks {
 	 * {@code !isInvulnerable() && canBeSeenByAnyone()} -- which already excludes
 	 * spectators and creative players, since a creative player is invulnerable.
 	 * Restating it here would be a second copy of a rule vanilla already enforces.
+	 *
+	 * <p><b>The {@code attacker} parameter is what makes a tamed companion safe.</b>
+	 * The aquatic/tameable expansion brought wolves, cats and parrots into scope,
+	 * and this project hands the player a permanently tamed wolf pack through Loyal
+	 * Pack -- so "is this mob owned by the very player it is being asked to bite"
+	 * has to be part of the predicate. It cannot be answered at construction time,
+	 * because taming happens long afterwards; see {@link #isOwnedBy}.
 	 */
-	public static boolean attractsAnimalAggression(Entity entity) {
+	public static boolean attractsAnimalAggression(Mob attacker, Entity entity) {
 		return entity instanceof Player player
 				&& acquired(player) != null
-				&& acquired(player).contains(BeastWrathBehavior.ID);
+				&& acquired(player).contains(BeastWrathBehavior.ID)
+				&& !isOwnedBy(attacker, player);
+	}
+
+	/**
+	 * True if {@code mob} is a tamed animal belonging to {@code player}.
+	 *
+	 * <p><b>Compares UUIDs, and never resolves the owner entity.</b>
+	 * {@code EntityReference.matches} is javap-verified as
+	 * {@code getUUID().equals(other.getUUID())} -- no lookup at all -- which is the
+	 * whole reason it is used here rather than {@code OwnableEntity.getOwner()}.
+	 * That default method resolves through the level and inherits the loaded-only
+	 * limitation the companion post-mortem recorded for
+	 * {@code Level.getEntity(UUID)}: an owner who is offline, in another dimension
+	 * or simply in an unloaded chunk would resolve to null, the mob would read as
+	 * unowned, and <b>the player's own pack would turn on them precisely when they
+	 * were far from it.</b> A UUID compare cannot fail that way.
+	 *
+	 * <p><b>Only the affected player's own animals are excluded.</b> A wolf tamed by
+	 * somebody else is still eligible and still attacks -- the brief's reading, and
+	 * the one consistent with every other effect being scoped to one player.
+	 *
+	 * <p>{@code isTame()} is checked first because an untamed wolf can still carry a
+	 * stale owner reference; both must hold.
+	 */
+	private static boolean isOwnedBy(Mob mob, Player player) {
+		if (!(mob instanceof TamableAnimal tamable) || !tamable.isTame()) {
+			return false;
+		}
+		EntityReference<LivingEntity> owner = tamable.getOwnerReference();
+		return owner != null && owner.matches(player);
 	}
 
 	/**

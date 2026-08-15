@@ -350,6 +350,15 @@ and `Mob.doHurtTarget` reads it first thing, so an armed cow without it crashes 
 See `entropy-effects` 1aj-1am, including why the install point is `Mob`'s constructor
 rather than `registerGoals`.
 
+**1an-1aq. FISH ARE NOT `Animal`, and an owner you have to RESOLVE is an owner you can
+lose.** `Cod -> AbstractFish -> WaterAnimal -> PathfinderMob` never passes through `Animal`,
+so a second attribute injection was needed; `Squid.travel(Vec3)` discards its argument
+entirely, so no navigation-driven goal can move a squid and it is excluded rather than
+faked; and the aquatic melee precedent is **Dolphin** (stock `MeleeAttackGoal`) not Guardian
+(a custom laser goal). For "is this mob mine", use `EntityReference.matches` — a bare UUID
+compare — never `OwnableEntity.getOwner()`, which resolves through the level and would read
+an owner in an unloaded chunk as *no* owner. See `entropy-effects` 1an-1aq.
+
 **1z. The squared speed rule (1e/1l) is a MOB rule — it does NOT apply to players.**
 A mob's forward input is its own speed value (`Mob.setSpeed` also calls `setZza`); a
 player's comes from `ClientInput` as a normalised 1.0, so player ground speed is

@@ -89,6 +89,40 @@ import com.entropymod.entropy.HookEffectBehavior;
  * variant ever has a goal that reads it. An attribute nothing attacks with is
  * inert.
  *
+ * <h2>2b. The aquatic and tameable expansion</h2>
+ *
+ * <p>Eligibility is now <b>two independent questions</b>, which used to be one:
+ * <i>(Animal or AbstractFish)</i> decides whether a mob is in scope at all, and
+ * <i>(empty targetSelector)</i> decides only whether it needs to be taught to
+ * fight. Conflating them is what excluded every tameable species, since a wolf
+ * can already fight and was therefore never asked whether it should.
+ *
+ * <ul>
+ *   <li><b>Fish are not {@code Animal}</b> -- {@code Cod -> AbstractSchoolingFish
+ *       -> AbstractFish -> WaterAnimal -> PathfinderMob}, with {@code Animal}
+ *       nowhere in it. Hence the second arm and a second attribute injection; see
+ *       {@code AbstractFishAttackDamageMixin}.</li>
+ *   <li><b>Squid, glow squid and dolphin are excluded by type</b>
+ *       ({@code AgeableWaterCreature}), and squid <i>must</i> be:
+ *       {@code Squid.travel(Vec3)} is {@code move(SELF, getDeltaMovement())} and
+ *       discards its argument entirely, so it is propelled by its own
+ *       {@code movementVector} and no navigation-driven goal could ever move it
+ *       toward a target. Reported rather than faked.</li>
+ *   <li><b>Wild wolves, cats and parrots are in scope; the player's own are
+ *       not.</b> Wolf and cat carry their own {@code MeleeAttackGoal}, so only
+ *       the target goal is added to them -- a second melee goal at a priority of
+ *       our choosing would retune how a <i>wild</i> wolf chases a skeleton.
+ *       Parrot has no attack goal and gets one.</li>
+ * </ul>
+ *
+ * <p>The stock {@code MeleeAttackGoal} is correct for a swimmer, and <b>Dolphin
+ * is the precedent, not Guardian</b>: a dolphin registers exactly that goal
+ * alongside {@code SmoothSwimmingMoveControl} and {@code WaterBoundPathNavigation},
+ * whereas Guardian's attack is a custom {@code GuardianAttackGoal} laser and
+ * would have been the wrong thing to copy. Fish steer from navigation too --
+ * {@code FishMoveControl.tick} reads {@code operation == MOVE_TO} and
+ * {@code !navigation.isDone()} and drives toward {@code wantedX/Y/Z}.
+ *
  * <h2>3. Scoping to one player</h2>
  *
  * <p>{@code NearestAttackableTargetGoal}'s {@code TargetingConditions.Selector}
@@ -97,6 +131,17 @@ import com.entropymod.entropy.HookEffectBehavior;
  * <b>never selects a non-holder as a target in the first place</b> -- the
  * scoping is in target <i>selection</i>, not in a post-hoc check on an
  * already-chosen victim. A second player in the world is invisible to the goal.
+ *
+ * <p><b>Ownership is part of the same predicate</b>, because this project hands
+ * the player a permanently tamed wolf pack through {@code LoyalPackBehavior} and
+ * those wolves must never turn. It is a <b>UUID compare</b>
+ * ({@code TamableAnimal.getOwnerReference().matches(player)}), never
+ * {@code OwnableEntity.getOwner()}, which resolves through the level and would
+ * read an owner in an unloaded chunk as no owner at all -- turning the pack
+ * hostile exactly when the player was far from it. Only the affected player's own
+ * animals are spared; one tamed by somebody else still attacks. Because taming
+ * happens long after construction, the check is live per scan and
+ * {@code WrathTargetGoal} re-asks it on continuation too.
  *
  * <p>The goals themselves are added to every eligible animal unconditionally,
  * and are <b>inert with no holder nearby</b>: the target goal selects nothing,
@@ -180,4 +225,10 @@ public final class BeastWrathBehavior extends HookEffectBehavior {
 
 	/** Priority for the target goal in the animal's (otherwise empty) {@code targetSelector}. */
 	public static final int TARGET_GOAL_PRIORITY = 1;
+
+	/**
+	 * {@code randomInterval} for the target goal -- re-scan for a holder roughly
+	 * every 10 ticks, vanilla's usual value for this parameter.
+	 */
+	public static final int TARGET_SCAN_INTERVAL = 10;
 }

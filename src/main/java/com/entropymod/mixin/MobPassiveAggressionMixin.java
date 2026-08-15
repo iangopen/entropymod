@@ -1,16 +1,16 @@
 package com.entropymod.mixin;
 
-import com.entropymod.entropy.EffectHooks;
 import com.entropymod.entropy.behavior.BeastWrathBehavior;
+import com.entropymod.entropy.wrath.WrathTargetGoal;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.PathfinderMob;
+import net.minecraft.world.entity.TamableAnimal;
 import net.minecraft.world.entity.ai.goal.GoalSelector;
 import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
-import net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal;
 import net.minecraft.world.entity.animal.Animal;
-import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.animal.fish.AbstractFish;
 import net.minecraft.world.level.Level;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -87,25 +87,40 @@ public abstract class MobPassiveAggressionMixin {
 			return;
 		}
 		Object self = this;
-		if (!(self instanceof Animal animal)) {
+		// The eligible universe: land animals and fish. Both are PathfinderMob, so
+		// both drive the stock goals below. Squid, glow squid and dolphin are
+		// AgeableWaterCreature and fall outside this test -- see the class javadoc
+		// for why that exclusion is a decision rather than an oversight.
+		if (!(self instanceof Animal || self instanceof AbstractFish)) {
 			return;
 		}
-		// An animal that already knows how to pick a target already knows how to
-		// fight -- wolves, polar bears, llamas. Only the genuinely passive get armed.
-		if (!this.targetSelector.getAvailableGoals().isEmpty()) {
+		PathfinderMob mob = (PathfinderMob) self;
+
+		// Two INDEPENDENT questions, which used to be one and could not stay one.
+		//
+		//   canAlreadyFight -- does this mob already own an attack goal?
+		//   eligible        -- should it turn on the holder at all?
+		//
+		// A wolf answers yes to both: it can already fight, and (when wild) it is
+		// in scope. Conflating them is what excluded every tameable species.
+		boolean canAlreadyFight = !this.targetSelector.getAvailableGoals().isEmpty();
+		boolean eligible = !canAlreadyFight || self instanceof TamableAnimal;
+		if (!eligible) {
 			return;
 		}
+
 		this.targetSelector.addGoal(
 				BeastWrathBehavior.TARGET_GOAL_PRIORITY,
-				new NearestAttackableTargetGoal<>(
-						animal,
-						Player.class,
-						10,      // randomInterval: re-scan every ~10 ticks, vanilla's usual value
-						true,    // mustSee -- line of sight, so walls and darkness still hide you
-						false,   // mustReach -- do not require a completed path before targeting
-						(candidate, serverLevel) -> EffectHooks.attractsAnimalAggression(candidate)));
-		this.goalSelector.addGoal(
-				BeastWrathBehavior.ATTACK_GOAL_PRIORITY,
-				new MeleeAttackGoal((PathfinderMob) animal, BeastWrathBehavior.SPEED_MODIFIER, false));
+				new WrathTargetGoal(mob, BeastWrathBehavior.TARGET_SCAN_INTERVAL));
+
+		// Only teach a mob to fight if it cannot already. A wolf and a cat each
+		// carry their own MeleeAttackGoal (javap-verified), so adding a second at a
+		// priority of our choosing would quietly retune how a WILD wolf chases a
+		// skeleton -- a change to an animal that has nothing to do with this effect.
+		if (!canAlreadyFight) {
+			this.goalSelector.addGoal(
+					BeastWrathBehavior.ATTACK_GOAL_PRIORITY,
+					new MeleeAttackGoal(mob, BeastWrathBehavior.SPEED_MODIFIER, false));
+		}
 	}
 }

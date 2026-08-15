@@ -156,6 +156,7 @@ public final class HarnessMain {
 		companionGatherTrigger();
 		companionAudienceLook();
 		beastWrath();
+		beastWrathAquaticAndTameable();
 		System.exit(Checks.summary());
 	}
 
@@ -6279,12 +6280,16 @@ public final class HarnessMain {
 		// ---------- scoping ---------------------------------------------------------
 		check(Checks.hasMethod(EffectHooks.class, "attractsAnimalAggression"),
 				"the per-player gate is a named method on EffectHooks, not inlined in the mixin");
+		// These live in WrathTargetGoal since the aquatic/tameable expansion, which
+		// needed the goal to re-check ownership on continuation as well as on
+		// selection. The PROPERTY is unchanged and is still asserted; only the class
+		// holding it moved.
 		check(Checks.classReferences(
-				com.entropymod.mixin.MobPassiveAggressionMixin.class, "attractsAnimalAggression"),
+				com.entropymod.entropy.wrath.WrathTargetGoal.class, "attractsAnimalAggression"),
 				"the target goal's Selector calls it -- so the gate is on target SELECTION, "
 						+ "and a player without the effect is never chosen in the first place");
-		check(Checks.classReferences(
-				com.entropymod.mixin.MobPassiveAggressionMixin.class, "NearestAttackableTargetGoal"),
+		check(com.entropymod.entropy.wrath.WrathTargetGoal.class.getSuperclass()
+						== net.minecraft.world.entity.ai.goal.target.NearestAttackableTargetGoal.class,
 				"...via a stock NearestAttackableTargetGoal, not a hand-rolled targeting loop");
 		check(!Checks.classReferences(
 				com.entropymod.mixin.MobPassiveAggressionMixin.class, "removeGoal"),
@@ -6304,6 +6309,216 @@ public final class HarnessMain {
 							+ "milking and breeding cannot consult hostility, and a cow chasing "
 							+ "you is still milkable mid-pursuit");
 		}
+	}
+
+	/**
+	 * Beast Wrath, aquatic and tameable expansion.
+	 *
+	 * <p>Same discipline as the land section: these pin the <b>vanilla</b> facts the
+	 * implementation rests on, against the real shipped classes, because mixins are
+	 * not applied in the harness. The hierarchy checks in particular are the ones a
+	 * version bump would break silently -- the whole expansion turns on fish not
+	 * being {@code Animal} and squid not being either.
+	 */
+	private static void beastWrathAquaticAndTameable() {
+		section("Beast Wrath: aquatic and tameable expansion");
+		HarnessBootstrap.init();
+
+		var attackDamage = net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE;
+
+		// ---------- THE HIERARCHY FINDING THAT SHAPED THE WHOLE EXPANSION ---------
+		// Fish are not Animal. If this ever becomes false the second attribute mixin
+		// is redundant and the eligibility test collects fish twice.
+		check(!net.minecraft.world.entity.animal.Animal.class.isAssignableFrom(
+						net.minecraft.world.entity.animal.fish.AbstractFish.class),
+				"AbstractFish is NOT an Animal -- the chain is AbstractFish -> WaterAnimal -> "
+						+ "PathfinderMob, with Animal nowhere in it. This is why "
+						+ "Animal.createAnimalAttributes cannot reach a cod and why the "
+						+ "eligibility test needed a second arm");
+		check(net.minecraft.world.entity.PathfinderMob.class.isAssignableFrom(
+						net.minecraft.world.entity.animal.fish.AbstractFish.class),
+				"...but AbstractFish IS a PathfinderMob, which is what lets the stock "
+						+ "MeleeAttackGoal and its (PathfinderMob) cast work unchanged for fish");
+		for (Class<?> fish : List.of(
+				net.minecraft.world.entity.animal.fish.Cod.class,
+				net.minecraft.world.entity.animal.fish.Salmon.class,
+				net.minecraft.world.entity.animal.fish.Pufferfish.class,
+				net.minecraft.world.entity.animal.fish.TropicalFish.class,
+				net.minecraft.world.entity.animal.frog.Tadpole.class)) {
+			check(net.minecraft.world.entity.animal.fish.AbstractFish.class.isAssignableFrom(fish),
+					fish.getSimpleName() + " is an AbstractFish, so one eligibility arm and one "
+							+ "attribute injection cover it with no species list");
+		}
+
+		// ---------- THE EXCLUSIONS, AND THAT THEY ARE STRUCTURAL ------------------
+		// Squid/GlowSquid/Dolphin are AgeableWaterCreature. They fall outside
+		// "Animal or AbstractFish" by TYPE, so the exclusion needs no blocklist --
+		// but it must be asserted, or a future reparent would silently include them.
+		for (Class<?> excluded : List.of(
+				net.minecraft.world.entity.animal.squid.Squid.class,
+				net.minecraft.world.entity.animal.squid.GlowSquid.class,
+				net.minecraft.world.entity.animal.dolphin.Dolphin.class)) {
+			check(!net.minecraft.world.entity.animal.Animal.class.isAssignableFrom(excluded)
+							&& !net.minecraft.world.entity.animal.fish.AbstractFish.class
+									.isAssignableFrom(excluded),
+					excluded.getSimpleName() + " is AgeableWaterCreature -- outside the eligible "
+							+ "universe by type, so it is excluded with no blocklist. Squid "
+							+ "REQUIRES this: Squid.travel(Vec3) is move(SELF, getDeltaMovement()) "
+							+ "and discards its argument, so a navigation-driven melee goal could "
+							+ "never move it toward anything");
+			check(net.minecraft.world.entity.PathfinderMob.class.isAssignableFrom(excluded),
+					"..." + excluded.getSimpleName() + " IS still a PathfinderMob, so the "
+							+ "exclusion is genuinely about movement and targeting rather than "
+							+ "about the goals failing to construct");
+		}
+
+		// ---------- CRASH-ON-FIRST-HIT: the fish half -----------------------------
+		// Exactly the failure the land session caught, reached through a hierarchy
+		// the land session's injection does not touch.
+		for (var type : List.of(
+				net.minecraft.world.entity.EntityType.COD,
+				net.minecraft.world.entity.EntityType.SALMON,
+				net.minecraft.world.entity.EntityType.PUFFERFISH,
+				net.minecraft.world.entity.EntityType.TROPICAL_FISH,
+				net.minecraft.world.entity.EntityType.TADPOLE)) {
+			var supplier = net.minecraft.world.entity.ai.attributes.DefaultAttributes.getSupplier(type);
+			check(!supplier.hasAttribute(attackDamage),
+					type.toShortString() + ": vanilla supplier has NO ATTACK_DAMAGE either -- so "
+							+ "the fish need the same treatment, and the land mixin alone would "
+							+ "not have given it to them");
+			boolean threw = false;
+			try {
+				supplier.getValue(attackDamage);
+			} catch (RuntimeException e) {
+				threw = true;
+			}
+			check(threw,
+					type.toShortString() + ": reading it THROWS -- an aggressive fish without "
+							+ "AbstractFishAttackDamageMixin takes the server tick down on its "
+							+ "first landed bite");
+		}
+
+		// ---------- the tameables need NO attribute work, checked not assumed -----
+		for (var type : List.of(
+				net.minecraft.world.entity.EntityType.WOLF,
+				net.minecraft.world.entity.EntityType.CAT,
+				net.minecraft.world.entity.EntityType.PARROT)) {
+			var supplier = net.minecraft.world.entity.ai.attributes.DefaultAttributes.getSupplier(type);
+			check(supplier.hasAttribute(attackDamage),
+					type.toShortString() + ": already defines its own ATTACK_DAMAGE ("
+							+ supplier.getValue(attackDamage) + "), so it keeps its VANILLA damage "
+							+ "rather than the effect's 2.0 -- a wild wolf bites like a wolf");
+		}
+		for (Class<?> tameable : List.of(
+				net.minecraft.world.entity.animal.wolf.Wolf.class,
+				net.minecraft.world.entity.animal.feline.Cat.class,
+				net.minecraft.world.entity.animal.parrot.Parrot.class)) {
+			check(net.minecraft.world.entity.TamableAnimal.class.isAssignableFrom(tameable),
+					tameable.getSimpleName() + " is a TamableAnimal, so the second eligibility "
+							+ "arm reaches it even though its targetSelector is not empty");
+			check(net.minecraft.world.entity.animal.Animal.class.isAssignableFrom(tameable),
+					"..." + tameable.getSimpleName() + " is also an Animal (TamableAnimal extends "
+							+ "Animal), so it was always inside the first arm's TYPE test -- only "
+							+ "the empty-targetSelector rule was excluding it");
+		}
+
+		// ---------- THE OWNERSHIP PRIMITIVE, DRIVEN FOR REAL ----------------------
+		// EntityReference.matches is javap-verified as a bare UUID compare. Driving
+		// it here proves the exclusion mechanism rather than naming it.
+		final class FakeOwner implements net.minecraft.world.level.entity.UniquelyIdentifyable {
+			private final java.util.UUID uuid;
+			FakeOwner(java.util.UUID uuid) { this.uuid = uuid; }
+			@Override public java.util.UUID getUUID() { return this.uuid; }
+			@Override public boolean isRemoved() { return false; }
+		}
+		java.util.UUID holder = java.util.UUID.randomUUID();
+		java.util.UUID somebodyElse = java.util.UUID.randomUUID();
+		var ownedByHolder = net.minecraft.world.entity.EntityReference.of(holder);
+		check(ownedByHolder.matches(new FakeOwner(holder)),
+				"EntityReference.matches is a pure UUID compare and returns true for the owner -- "
+						+ "so a wolf tamed by the affected player is excluded from its own goal");
+		check(!ownedByHolder.matches(new FakeOwner(somebodyElse)),
+				"...and false for a different player, so a wolf tamed by SOMEBODY ELSE stays "
+						+ "eligible and still attacks -- only the affected player's own animals "
+						+ "are spared, which is the requested reading");
+		check(!ownedByHolder.matches(new FakeOwner(java.util.UUID.randomUUID())),
+				"...and a never-tamed wild wolf, which carries no owner at all, is likewise "
+						+ "eligible");
+		// The reason it is matches() and not getOwner(): no level, no lookup, no
+		// loaded-chunk dependency. This call did not touch a world at all.
+		check(Checks.classReferences(EffectHooks.class, "getOwnerReference")
+						&& Checks.classReferences(EffectHooks.class, "matches")
+						&& Checks.classReferences(EffectHooks.class, "isTame"),
+				"EffectHooks resolves ownership through getOwnerReference/matches/isTame");
+		check(!Checks.classReferences(EffectHooks.class, "getRootOwner"),
+				"...and NOT through OwnableEntity's resolving accessors, which route through the "
+						+ "level and inherit the loaded-only limitation of getEntity(UUID) -- an "
+						+ "owner in an unloaded chunk would read as unowned and the player's own "
+						+ "pack would turn on them exactly when they were far from it");
+
+		// ---------- retention, not just selection --------------------------------
+		check(Checks.hasMethod(com.entropymod.entropy.wrath.WrathTargetGoal.class,
+						"canContinueToUse"),
+				"WrathTargetGoal overrides canContinueToUse -- TargetGoal's own version checks "
+						+ "target/canAttack/team/range/line-of-sight and NEVER re-tests the "
+						+ "Selector, so without this a wolf tamed mid-attack keeps attacking its "
+						+ "new owner");
+		check(Checks.classReferences(com.entropymod.entropy.wrath.WrathTargetGoal.class,
+						"attractsAnimalAggression"),
+				"...and it re-asks the IDENTICAL predicate rather than restating the rule, so "
+						+ "selection and retention cannot drift apart (1k/1q/1s)");
+
+		// ---------- the mixin's two independent questions -------------------------
+		check(Checks.classReferences(
+						com.entropymod.mixin.MobPassiveAggressionMixin.class, "AbstractFish")
+						&& Checks.classReferences(
+								com.entropymod.mixin.MobPassiveAggressionMixin.class, "TamableAnimal"),
+				"the eligibility test reads both arms: (Animal or AbstractFish) and "
+						+ "(empty targetSelector or TamableAnimal)");
+		check(Checks.classReferences(
+						com.entropymod.mixin.MobPassiveAggressionMixin.class, "MeleeAttackGoal"),
+				"...and a melee goal is still installed, but only for a mob that cannot already "
+						+ "fight -- a wolf and a cat each carry their own, and a second one at a "
+						+ "priority of our choosing would retune how a WILD wolf chases a skeleton");
+		check(!Checks.classReferences(
+						com.entropymod.mixin.MobPassiveAggressionMixin.class, "removeGoal"),
+				"still nothing is ever removed: the goals are inert without a holder, so the "
+						+ "entity-state idempotency trap (1h) is still avoided by construction");
+
+		// ---------- REGRESSION: the land build is untouched ------------------------
+		checkNear(constant(BeastWrathBehavior.class, "ATTACK_DAMAGE"), 2.0, 1e-9,
+				"land damage unchanged at 2.0 -- the expansion added species, not a retune");
+		check((int) constant(BeastWrathBehavior.class, "ATTACK_GOAL_PRIORITY") == 2
+						&& (int) constant(BeastWrathBehavior.class, "TARGET_GOAL_PRIORITY") == 1,
+				"...and the goal priorities are unchanged, so wheat still does not pacify and "
+						+ "fire and water still win");
+		for (var type : List.of(
+				net.minecraft.world.entity.EntityType.COW,
+				net.minecraft.world.entity.EntityType.PIG,
+				net.minecraft.world.entity.EntityType.CHICKEN,
+				net.minecraft.world.entity.EntityType.SHEEP,
+				net.minecraft.world.entity.EntityType.RABBIT)) {
+			check(net.minecraft.world.entity.ai.attributes.DefaultAttributes.getSupplier(type) != null,
+					type.toShortString() + ": still resolves a supplier -- the original five are "
+							+ "reached by the unchanged first eligibility arm");
+		}
+
+		// ---------- the effect itself is still one effect --------------------------
+		// Nothing about the expansion touches the run model: same id, so no-repeat,
+		// persistence and idempotency are the same facts the land section asserted.
+		EffectDefinition def = EffectRegistry.byId(BeastWrathBehavior.ID);
+		check(def != null && def.minEntropy() == 25 && def.maxEntropy() == 50
+						&& def.phase() == EffectPhase.BAD && def.counterplay(),
+				"beast_wrath: id, window, phase and counterplay all unchanged by the expansion");
+		check(EffectBehaviors.get(BeastWrathBehavior.ID) instanceof HookEffectBehavior,
+				"...still a HookEffectBehavior, so apply() is final and empty and there is still "
+						+ "no per-player state to re-derive on respawn, rejoin or reload");
+		AcquiredEffects acquired = new AcquiredEffects();
+		acquired.add(BeastWrathBehavior.ID);
+		acquired.add(BeastWrathBehavior.ID);
+		check(acquired.size() == 1 && acquired.contains(BeastWrathBehavior.ID),
+				"...and re-adding is still a no-op, so no-repeat and the acquired-set round trip "
+						+ "hold for the expanded effect exactly as before");
 	}
 
 	private HarnessMain() {}

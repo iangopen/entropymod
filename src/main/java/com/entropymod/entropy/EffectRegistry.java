@@ -234,7 +234,8 @@ public final class EffectRegistry {
 		// player (0.24 against a sprint's 5.6 b/s), need line of sight to target at
 		// all, and a door or a two-block ledge ends the pursuit outright.
 		register("beast_wrath", "Beast Wrath",
-				"Cows, pigs, chickens, sheep and rabbits turn on you -- a heart a hit",
+				"Passive animals and fish turn on you -- even wild wolves and cats. "
+						+ "Your own tamed animals stay loyal",
 				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
 
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.

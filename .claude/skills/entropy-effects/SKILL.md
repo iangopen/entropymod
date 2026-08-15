@@ -4831,3 +4831,179 @@ vs COMBAT, so anti-stacking never separates them): the Whisperer suppresses `Pan
 and `AvoidEntityGoal` for its holder while Beast Wrath adds attack goals, so a run holding
 both faces animals that neither flee nor panic and do attack. Coherent rather than
 contradictory — the two effects act on different goals and neither reads the other.
+
+---
+
+### Beast Wrath, the aquatic and tameable expansion — findings 1an-1aq
+Eligibility widened from "Animal with an empty targetSelector" to fish and to wild
+tameables. **No effect other than Beast Wrath was touched, and the damage number, goal
+priorities, entropy window and counterplay flag are all unchanged** — the expansion added
+species, not a retune.
+
+#### 1an. ⚑ FISH ARE NOT `Animal`. The land build's attribute injection cannot reach one.
+The assumption that has to be checked before anything else, and it is false. The real
+chains, javap-verified:
+
+| mob | chain |
+|---|---|
+| Cod / Salmon / TropicalFish | `AbstractSchoolingFish -> AbstractFish -> WaterAnimal -> PathfinderMob -> Mob` |
+| Pufferfish, Tadpole | `AbstractFish -> WaterAnimal -> PathfinderMob -> Mob` |
+| **Squid / GlowSquid / Dolphin** | **`AgeableWaterCreature -> AgeableMob -> PathfinderMob -> Mob`** |
+| Turtle / Frog / Axolotl | `Animal -> AgeableMob -> PathfinderMob` — ordinary land-animal shape |
+
+**`Animal` appears nowhere in a fish's chain.** So `Animal.createAnimalAttributes` is never
+called for a cod and the shipped `AnimalAttackDamageMixin` cannot reach it — the crash-on-
+first-hit of 1ak is live again, through a hierarchy the original injection does not touch.
+`AbstractFish.createAttributes()` is `Mob.createMobAttributes()` plus `MAX_HEALTH` and
+**no `ATTACK_DAMAGE`**, and Cod/Salmon/Pufferfish/TropicalFish declare no
+`createAttributes` of their own, so one second injection covers the whole family.
+
+**Two things that go the other way and would be got wrong by deducing from the hierarchy:**
+
+- **`Tadpole` extends `AbstractFish` but its own `createAttributes` calls
+  `Animal.createAnimalAttributes`** — so it was already covered by the *land* mixin,
+  through a superclass it does not extend.
+- **Everything above is a `PathfinderMob`**, squid included. So the stock
+  `MeleeAttackGoal(PathfinderMob, ...)` and `NearestAttackableTargetGoal` construct for
+  every one of them, and the `(PathfinderMob)` cast needed no change. **The goals were
+  never the obstacle** — which is worth stating because the brief reasonably expected them
+  to be.
+
+#### 1ao. ⚑ THE AQUATIC MELEE PRECEDENT IS **DOLPHIN**, NOT GUARDIAN — and Squid cannot be driven at all
+Guardian is the obvious reference and it is the **wrong** one. `Guardian.registerGoals`
+registers `Guardian$GuardianAttackGoal` — a custom laser goal — and no `MeleeAttackGoal`.
+Copying it would have meant reimplementing a ranged attack for a cod.
+
+**`Dolphin.registerGoals` registers a stock `MeleeAttackGoal`**, alongside
+`SmoothSwimmingMoveControl`, `SmoothSwimmingLookControl` and `WaterBoundPathNavigation`.
+That is vanilla's own proof that the ordinary goal works for a swimmer, and it is why the
+land build's construction transferred unchanged rather than needing an aquatic variant.
+
+Fish are driven the same way, verified in `AbstractFish$FishMoveControl.tick`: it reads
+`operation == MOVE_TO` and `!getNavigation().isDone()`, sets speed from
+`speedModifier * MOVEMENT_SPEED`, and steers toward `wantedX/Y/Z`. **A navigation-issued
+path really does move a fish**, so `MeleeAttackGoal` works on one.
+
+**`Squid` and `GlowSquid` are the one category that had to be reported rather than
+shipped**, and the reason is structural:
+
+```java
+// Squid.travel(Vec3) -- the ENTIRE method
+move(MoverType.SELF, getDeltaMovement());
+```
+
+It **discards its argument**. No `moveRelative`, no attribute read, no navigation
+influence. Squid propulsion is entirely its own `movementVector`, written by
+`SquidRandomMovementGoal` in `aiStep`; it overrides no `createNavigation` (so it holds a
+land `GroundPathNavigation` it never uses) and installs no swimming `MoveControl`. **A
+`MeleeAttackGoal` on a squid would acquire the target, face it, and never move** — a goal
+that applies cleanly and does nothing, i.e. failure mode 1 with no fix short of writing a
+bespoke squid propulsion goal. Excluded and reported.
+
+**The exclusion is by TYPE, with no blocklist**: squid, glow squid and dolphin are all
+`AgeableWaterCreature`, which is neither `Animal` nor `AbstractFish`, so the eligibility
+test drops them for free. That coincidence is load-bearing, so the harness asserts it
+directly — a future reparent of `Squid` would otherwise silently include it. (Dolphin is
+independently excluded anyway: it carries a `HurtByTargetGoal`, so it already knows how to
+fight.)
+
+#### 1ap. ⚑ OWNERSHIP MUST BE A UUID COMPARE, AND MUST BE LIVE — `getOwner()` is the trap
+This project gives the player a permanently tamed wolf pack through Loyal Pack, so
+"wild wolves attack you" and "your own pack never does" have to hold simultaneously.
+
+**The API is not what the tutorials use.** `TamableAnimal` declares **no `getOwner()` and
+no `isOwnedBy()`** in this version. What it has is `isTame()`, `setTame`, `setOwner`,
+`getOwnerReference()`, `tame(Player)`. `getOwner()` exists only as a **default method on
+`OwnableEntity`**, and it *resolves the entity through the level*.
+
+> **Resolving the owner is the loaded-only trap of the companion post-mortem, wearing a
+> different name.** An owner who is offline, in another dimension, or simply in an
+> unloaded chunk resolves to `null`, the wolf reads as unowned, and **the player's own
+> pack turns on them precisely when they are far from it** — the worst possible time and
+> a bug that would never reproduce standing next to the pack.
+
+The right call is **`EntityReference.matches`**, javap-verified as the whole method:
+
+```java
+public boolean matches(StoredEntityType other) {
+    return getUUID().equals(other.getUUID());   // no level, no lookup, no chunk
+}
+```
+
+A pure UUID compare, so it cannot fail for an unloaded owner. `isTame()` is checked first
+because an untamed animal can still carry a stale owner reference. **Only the affected
+player's own animals are excluded** — one tamed by somebody else stays eligible, which is
+the reading consistent with every other effect being scoped to one player.
+
+**It must be evaluated live, not at construction.** Taming happens long after the mob is
+built, so a construction-time eligibility test would freeze the answer at "wild" forever
+and a wolf tamed afterwards would keep attacking. The check therefore rides in the
+`TargetingConditions.Selector`, which runs per candidate on every scan.
+
+**And selection alone is not enough**, which is the sharp half.
+`TargetGoal.canContinueToUse` was read in bytecode: it checks the target's existence,
+`Mob.canAttack`, team, follow distance and line of sight, and **never re-tests the
+`Selector`**. Selection is a one-time gate; retention is a different rule set. So a wild
+wolf that has already acquired the player, then gets tamed, **keeps attacking its new
+owner** until it happens to lose sight. `WrathTargetGoal` overrides `canContinueToUse` to
+re-ask the *identical* predicate — not a restatement of it, so selection and retention
+cannot drift apart (the 1k/1q/1s failure).
+
+`TamableAnimal.tame(Player)` does **not** call `setTarget(null)`, checked rather than
+hoped — so vanilla does not close this for us.
+
+#### 1aq. Eligibility is TWO questions, and conflating them is what excluded the tameables
+The original rule — `Animal` with an **empty `targetSelector`** — was a good definition of
+"passive" and a bad definition of "in scope". It answers two things at once:
+
+| question | the rule that answers it now |
+|---|---|
+| should this mob turn on the holder? | `Animal` **or** `AbstractFish` |
+| does it need to be *taught* to fight? | `targetSelector` is empty |
+
+A wolf answers **yes** to the first and **no** to the second, and the old rule had no way
+to express that. Splitting them is the entire expansion:
+
+- **Wolf and Cat** carry their own `MeleeAttackGoal` (2 attack-goal references each in
+  `registerGoals`), so they receive **only** the target goal. Adding a second melee goal at
+  a priority of our choosing would quietly retune how a *wild* wolf chases a skeleton — a
+  change to an animal that has nothing to do with this effect.
+- **Parrot has no attack goal at all** and gets one. Note Parrot's `targetSelector` is
+  **already empty**, so it was silently eligible under the *shipped* land build — including
+  a tamed parrot on the player's own shoulder. The ownership gate fixes that as a side
+  effect, and it is worth recording as a latent bug the expansion closed rather than one it
+  introduced.
+- Panda, Bee and Fox have non-empty target selectors and are not tameable, so they stay
+  excluded — unchanged, and the "already knows how to fight" reasoning still holds for
+  them.
+
+**Species already in scope under the land build but never enumerated:** Turtle, Frog,
+Axolotl, Goat, Armadillo, Sniffer, Camel and Parrot all have empty target selectors and
+were always eligible. The original session's "five species" was the set *verified*, not
+the set reached.
+
+#### Damage: 2.0 stays uniform, and the tameables keep their VANILLA numbers
+The expansion adds exactly one new number to decide — fish — because Wolf (4.0), Cat (3.0)
+and Parrot (3.0) already define `ATTACK_DAMAGE` and `buildKeepingLast()` leaves theirs
+alone. **A wild wolf under this curse bites like a wolf**, which is both the more
+interesting outcome and the one that needs no justification.
+
+**Fish ship at the same 2.0**, and the argument is the i-frame ceiling of 1am read in an
+aquatic setting. Because `INVULNERABLE_DURATION` caps a swarm at roughly one mob's damage
+per second however many there are, **the per-hit number is the entire DPS** — so halving it
+for fish would not make a school of cod "feel lighter than a cow", it would halve the whole
+effect underwater. And underwater is where the player is *already* worst off: managing air,
+slowed, with weakened melee and no sweep. A reduced fish bite would make **water the safe
+place to be under a curse whose whole premise is that nature has turned on you**, which
+inverts it.
+
+The counterplay is correspondingly stronger and does the balancing instead: a fish cannot
+leave the water, so **surfacing or stepping onto land ends the pursuit completely** — a
+harder stop than anything the land species offer, where a cow will follow you across a
+continent.
+
+**Flagged, not resolved: Pufferfish stacks two mechanics.** It already damages and poisons
+on contact through its own puffing behaviour, and it now also gets an attack goal. Nothing
+breaks and no crash is possible, but it is the one species whose felt danger is meaningfully
+above the 2.0 the number implies. Worth watching in play before deciding whether it needs
+its own value.
