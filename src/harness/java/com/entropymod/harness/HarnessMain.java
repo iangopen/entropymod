@@ -42,7 +42,10 @@ import com.entropymod.entropy.behavior.TheEntourageBehavior;
 import com.entropymod.entropy.EntropyDamageTypes;
 import com.entropymod.entropy.HookEffectBehavior;
 import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
+import net.minecraft.world.item.ItemStack;
 import com.entropymod.entropy.behavior.BeastWrathBehavior;
+import com.entropymod.entropy.behavior.ReverseMidasBehavior;
+import com.entropymod.entropy.behavior.GraveRobberBehavior;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.behavior.VampireRulesBehavior;
 import com.entropymod.entropy.quake.EarthquakeService;
@@ -157,6 +160,7 @@ public final class HarnessMain {
 		companionAudienceLook();
 		beastWrath();
 		beastWrathAquaticAndTameable();
+		reverseMidasAndGraveRobber();
 		System.exit(Checks.summary());
 	}
 
@@ -6519,6 +6523,291 @@ public final class HarnessMain {
 		check(acquired.size() == 1 && acquired.contains(BeastWrathBehavior.ID),
 				"...and re-adding is still a no-op, so no-repeat and the acquired-set round trip "
 						+ "hold for the expanded effect exactly as before");
+	}
+
+	/**
+	 * Reverse Midas and Grave Robber -- the Tier 2 world/loot pair.
+	 *
+	 * <p>Both are hook effects with no per-player state, so the run-model checks
+	 * (idempotency, no-repeat, persistence) are cheap and are done for both here.
+	 * The interesting assertions are the ones that pin <b>vanilla facts the
+	 * implementations rest on</b> and the ones that drive the Minecraft-free
+	 * decision functions across their real boundaries.
+	 */
+	private static void reverseMidasAndGraveRobber() {
+		section("Reverse Midas + Grave Robber");
+		HarnessBootstrap.init();
+
+		// ================= shared run-model checks =================
+		for (String id : List.of(ReverseMidasBehavior.ID, GraveRobberBehavior.ID)) {
+			EffectDefinition def = EffectRegistry.byId(id);
+			check(def != null, id + ": registered in EffectRegistry");
+			check(EffectBehaviors.get(id) != null, id + ": wired in EffectBehaviors");
+			if (def != null) {
+				check(def.minEntropy() == 25 && def.maxEntropy() == 50,
+						id + ": Tier 2 entropy window 25-50");
+				check(def.counterplay(),
+						id + ": counterplay = true -- required below entropy 40 (CLAUDE.md Part 2)");
+			}
+			// Idempotency: both are HookEffectBehaviors, so apply() is final and
+			// empty. There is no derived state to rebuild on respawn/rejoin, which is
+			// what makes "apply ten times" trivially safe rather than merely tested.
+			check(EffectBehaviors.get(id) instanceof HookEffectBehavior,
+					id + ": is a HookEffectBehavior -- apply() final and empty, so respawn, "
+							+ "rejoin and dimension change re-application are no-ops by construction");
+
+			// No-repeat + persistence round trip.
+			AcquiredEffects acquired = new AcquiredEffects();
+			acquired.add(id);
+			acquired.add(id);
+			check(acquired.size() == 1, id + ": re-adding is a no-op -- the acquired set IS no-repeat");
+			AcquiredEffects reloaded = new AcquiredEffects();
+			for (String saved : acquired.ids()) {
+				reloaded.add(saved);
+			}
+			check(reloaded.contains(id),
+					id + ": survives an acquired-set round trip, so it is restored on load");
+			for (int entropy : new int[] {25, 50}) {
+				for (EffectPhase phase : EffectPhase.values()) {
+					EffectRegistry.RollResult roll = EffectRegistry.roll(
+							phase, entropy, new java.util.Random(7),
+							acquired.ids(), acquired.occupiedCategories());
+					if (roll.repeatFallback()) {
+						continue;
+					}
+					for (EffectDefinition offered : roll.choices()) {
+						check(!offered.id().equals(id),
+								id + ": not re-offered at entropy " + entropy + "/" + phase);
+					}
+				}
+			}
+		}
+		check(EffectRegistry.byId(ReverseMidasBehavior.ID).phase() == EffectPhase.BAD,
+				"reverse_midas is BAD");
+		check(EffectRegistry.byId(GraveRobberBehavior.ID).phase() == EffectPhase.GOOD,
+				"grave_robber is GOOD");
+		check(EffectRegistry.byId(ReverseMidasBehavior.ID).category()
+						!= EffectRegistry.byId(GraveRobberBehavior.ID).category(),
+				"...and they sit in different categories, so anti-stacking never has to "
+						+ "choose between them and a run may hold both");
+
+		// ================= REVERSE MIDAS =================
+
+		// --- the subclass-override finding that chose the injection point ---
+		// getPlacementState is the obvious target and is failure mode 1. Assert the
+		// override exists, so if vanilla ever removes it nobody "simplifies" the
+		// mixin onto the easier target without re-deriving this.
+		boolean standingAndWallOverrides = false;
+		try {
+			Class<?> sw = Class.forName("net.minecraft.world.item.StandingAndWallBlockItem");
+			for (var m : sw.getDeclaredMethods()) {
+				if (m.getName().equals("getPlacementState")) {
+					standingAndWallOverrides = true;
+				}
+			}
+		} catch (ClassNotFoundException e) {
+			// leave false -- the check below reports it
+		}
+		check(standingAndWallOverrides,
+				"StandingAndWallBlockItem OVERRIDES getPlacementState (and javap shows zero "
+						+ "invokespecial back to super) -- torches, signs and banners. This is why "
+						+ "the mixin targets the placeBlock CALL SITE inside place() instead, which "
+						+ "no subclass overrides");
+		check(Checks.classReferences(
+						com.entropymod.mixin.BlockItemPlacementMixin.class, "placeBlock"),
+				"...and the mixin does target placeBlock");
+		check(!Checks.classReferences(
+						com.entropymod.mixin.BlockItemPlacementMixin.class, "getPlacementState"),
+				"...and does NOT target getPlacementState");
+
+		// --- BEFORE, not AFTER: nothing is placed and then destroyed ---
+		check(!Checks.classReferences(
+						com.entropymod.mixin.BlockItemPlacementMixin.class, "setBlockAndUpdate")
+						&& !Checks.classReferences(
+								com.entropymod.mixin.BlockItemPlacementMixin.class, "removeBlock"),
+				"the mixin never writes or removes a block itself -- it replaces the state BEFORE "
+						+ "vanilla places it, so the original block's block entity is never created "
+						+ "and there is nothing in the world to destroy afterwards");
+
+		// --- the block-entity/NBT question ---
+		// The intuition is that placing a chest destroys its contents. It cannot: a
+		// chest item carries nothing, and under this effect the chest never reaches
+		// the world at all. The only item that stores a container in ITSELF is a
+		// shulker box, and that is the whole of the carve-out.
+		//
+		// NOTE: real ItemStacks cannot be built here -- item components are
+		// datapack-bound, so `new ItemStack(Items.CHEST)` throws "Components not
+		// bound yet" and Item.components() cannot repair it because it delegates
+		// back to the same unbound holder. So the rule is driven on the component
+		// VALUE, which is a plain object and needs no registry.
+		check(!EffectHooks.carriesStoredContents(null),
+				"an item with NO container component at all -- a chest, a furnace, every "
+						+ "ordinary block -- is turned to gold with no exception. A chest's "
+						+ "inventory only ever exists in the world, so there is nothing to lose");
+		check(!EffectHooks.carriesStoredContents(
+						net.minecraft.world.item.component.ItemContainerContents.EMPTY),
+				"an EMPTY shulker box has nothing to lose and is turned to gold too -- the "
+						+ "carve-out keys on stored contents, not on the item type");
+		check(!EffectHooks.carriesStoredContents(
+						net.minecraft.world.item.component.ItemContainerContents.fromItems(
+								List.of(net.minecraft.world.item.ItemStack.EMPTY))),
+				"...and contents made only of empty stacks still count as empty, so the "
+						+ "predicate is nonEmptyItems() rather than a size check");
+		check(Checks.classReferences(EffectHooks.class, "nonEmptyItems"),
+				"the non-empty case is decided by nonEmptyItems() on the CONTAINER component "
+						+ "-- one predicate rather than an item list, so any modded container "
+						+ "item is covered too");
+		check(Checks.classReferences(EffectHooks.class, "CONTAINER"),
+				"...read from DataComponents.CONTAINER, which is where a shulker box stores "
+						+ "the up-to-27 stacks that would otherwise vanish from one misclick");
+		check(Checks.classReferences(EffectHooks.class, "sparesStoredContents")
+						&& Checks.hasMethod(EffectHooks.class, "sparesStoredContents"),
+				"...and the carve-out is ONE named call inside reverseMidasPlacement, so "
+						+ "deleting it gives the literal no-exceptions version of the effect");
+
+		// --- scoping ---
+		check(Checks.classReferences(EffectHooks.class, "reverseMidasPlacement"),
+				"all gating lives in EffectHooks, keeping the mixin to one line");
+		check(Checks.classReferences(EffectHooks.class, "getPlayer"),
+				"the gate reads BlockPlaceContext.getPlayer() -- null for a dispenser, since "
+						+ "DirectionalPlaceContext's constructor passes aconst_null, so dispenser "
+						+ "placement is excluded by construction rather than by a block-source test");
+		check(Checks.classReferences(EffectHooks.class, "ServerLevel"),
+				"...and it is server-side only, so the placing client still predicts vanilla and "
+						+ "the server's block update corrects it (the Slashed Pockets desync)");
+
+		// --- what it actually places ---
+		check(net.minecraft.world.level.block.Blocks.GOLD_BLOCK.defaultBlockState()
+						.getBlock() == net.minecraft.world.level.block.Blocks.GOLD_BLOCK,
+				"the replacement is a plain gold block default state -- no custom block, so it "
+						+ "mines, drops and stacks exactly like any gold block");
+
+		// ================= GRAVE ROBBER =================
+
+		// --- the radius IS vanilla's follow range, read from the real supplier ---
+		var frAttr = net.minecraft.world.entity.ai.attributes.Attributes.FOLLOW_RANGE;
+		double radius = constant(GraveRobberBehavior.class, "RADIUS");
+		for (var t : List.of(
+				net.minecraft.world.entity.EntityType.CREEPER,
+				net.minecraft.world.entity.EntityType.SKELETON,
+				net.minecraft.world.entity.EntityType.SPIDER,
+				net.minecraft.world.entity.EntityType.COW)) {
+			double fr = net.minecraft.world.entity.ai.attributes.DefaultAttributes
+					.getSupplier(t).getValue(frAttr);
+			checkNear(radius, fr, 1e-9,
+					"the radius IS " + t.toShortString() + "'s real FOLLOW_RANGE (" + fr + ") -- "
+							+ "16 is Mob.createMobAttributes()'s baseline, so 'near' means 'close "
+							+ "enough that the mob was engaging you' rather than an invented number");
+		}
+		checkNear(frAttr.value().getDefaultValue(), 32.0, 1e-9,
+				"...and the ATTRIBUTE's registered default is 32.0, which no ordinary mob uses. "
+						+ "Reading that instead of the supplier is the exact mistake that cost "
+						+ "Creeper Magnet a bug (finding 1e)");
+		double zombieRange = net.minecraft.world.entity.ai.attributes.DefaultAttributes
+				.getSupplier(net.minecraft.world.entity.EntityType.ZOMBIE).getValue(frAttr);
+		check(zombieRange > radius,
+				"...stated rather than hidden: a ZOMBIE overrides it to " + zombieRange + ", so a "
+						+ "zombie can engage from beyond this radius and die outside it. 16 is the "
+						+ "baseline engagement range, not a universal one");
+
+		// --- the sphere boundary, driven directly ---
+		double r = GraveRobberBehavior.RADIUS;
+		check(GraveRobberBehavior.isNear(0.0), "a mob dying at the player's feet is near");
+		check(GraveRobberBehavior.isNear(r * r), "...a mob at exactly 16.0 blocks is near (inclusive)");
+		check(!GraveRobberBehavior.isNear((r + 0.01) * (r + 0.01)),
+				"...and one at 16.01 is not -- the boundary is exact, not approximate");
+		// The box-vs-sphere leak this guards against.
+		double corner = r * Math.sqrt(3.0);
+		check(!GraveRobberBehavior.isNear(corner * corner),
+				"a mob at the CORNER of a 16-block box (" + String.format("%.2f", corner)
+						+ " blocks) is rejected -- an unfiltered AABB would have leaked the radius "
+						+ "by 73%, and an extra drop looks identical whatever the distance was");
+
+		// --- the proc rate, driven across its real boundary and at scale ---
+		float chance = (float) constant(GraveRobberBehavior.class, "CHANCE");
+		checkNear(chance, 0.15f, 1e-6, "proc chance is 15%");
+		check(!GraveRobberBehavior.rollsBonus(chance),
+				"the roll is strictly less-than, so a sample of exactly CHANCE does NOT proc");
+		check(GraveRobberBehavior.rollsBonus(0.0f) && !GraveRobberBehavior.rollsBonus(0.999f),
+				"...0.0 procs and 0.999 does not");
+		int procs = 0;
+		int trials = 200_000;
+		java.util.Random rng = new java.util.Random(20260815L);
+		for (int i = 0; i < trials; i++) {
+			if (GraveRobberBehavior.rollsBonus(rng.nextFloat())) {
+				procs++;
+			}
+		}
+		double observed = (double) procs / trials;
+		checkNear(observed, chance, 0.005,
+				"over " + trials + " uniform samples the observed rate is "
+						+ String.format("%.4f", observed) + " -- the constant is the real rate, not "
+						+ "just a number stored next to the code");
+		// What that rate means to a player, asserted so a retune has to face it.
+		double atLeastOneInFive = 1.0 - Math.pow(1.0 - chance, 5);
+		check(atLeastOneInFive > 0.5,
+				"P(at least one proc in a 5-mob fight) = " + String.format("%.1f%%", atLeastOneInFive * 100)
+						+ " -- clears a coin flip per ordinary fight, which is the bar for a GOOD "
+						+ "effect the player is meant to notice they picked");
+
+		// --- choosing ONE stack, and the empty roll ---
+		check(GraveRobberBehavior.chooseBonusIndex(0, 0.5f) == -1,
+				"an EMPTY second roll returns -1 and drops nothing -- not re-rolled, because a mob "
+						+ "that genuinely rolled nothing has nothing extra to give");
+		check(GraveRobberBehavior.chooseBonusIndex(3, 0.0f) == 0
+						&& GraveRobberBehavior.chooseBonusIndex(3, 0.99f) == 2,
+				"...and a non-empty roll indexes uniformly across it");
+		check(GraveRobberBehavior.chooseBonusIndex(3, 1.0f) == 2,
+				"...a roll of exactly 1.0f clamps to the last index rather than running one past "
+						+ "the end -- reachable for a float sample, and it would be an "
+						+ "IndexOutOfBounds on a live server");
+		int[] buckets = new int[4];
+		for (int i = 0; i < 40_000; i++) {
+			buckets[GraveRobberBehavior.chooseBonusIndex(4, rng.nextFloat())]++;
+		}
+		for (int i = 0; i < 4; i++) {
+			check(Math.abs(buckets[i] - 10_000) < 500,
+					"...bucket " + i + " got " + buckets[i] + " of 40000 -- the choice is genuinely "
+							+ "uniform, so no slot of a mob's loot is favoured");
+		}
+
+		// --- the drop is vanilla's own roll, not an imitation ---
+		check(Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "dropFromLootTable"),
+				"the bonus comes from vanilla's own PUBLIC dropFromLootTable overload, which builds "
+						+ "the identical LootParams the death drop used -- so Looting, the killer's "
+						+ "weapon, difficulty and datapack edits are all honoured for free");
+		check(Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "getLootTable"),
+				"...against the dead mob's OWN table, so the effect can never produce an item the "
+						+ "mob does not already drop -- the property that makes it farm-safe");
+		check(!Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "ExperienceOrb")
+						&& !Checks.classReferences(
+								com.entropymod.entropy.loot.GraveRobberDrops.class, "giveExperiencePoints"),
+				"...and it grants NO experience: XP is what an AFK farm converts most efficiently, "
+						+ "so it is deliberately excluded from the reward");
+		check(Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "isSpectator"),
+				"spectators are excluded, so a dead player ghosting past a mob farm collects nothing");
+		check(Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "getLastHurtByPlayer"),
+				"the playerKill flag mirrors vanilla's own derivation, so the SAME loot pool is "
+						+ "rolled -- getting it wrong would silently change what drops");
+		check(!Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "getKillCredit"),
+				"...and there is NO kill-attribution check: the effect is proximity-only by design, "
+						+ "so a creeper killing a zombie beside you pays out");
+
+		// --- the regression gate: nothing runs when nobody holds it ---
+		AcquiredEffects none = new AcquiredEffects();
+		check(!com.entropymod.entropy.loot.GraveRobberDrops.isActive(none),
+				"with an empty acquired set the death hook is inert -- it runs on EVERY mob death "
+						+ "in the world, so the early-out has to precede touching the entity");
+		AcquiredEffects held = new AcquiredEffects();
+		held.add(GraveRobberBehavior.ID);
+		check(com.entropymod.entropy.loot.GraveRobberDrops.isActive(held),
+				"...and active once the run holds it");
 	}
 
 	private HarnessMain() {}

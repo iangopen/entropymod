@@ -5,6 +5,7 @@
 	"mixins": [
 		"EntropyModMixin",
 		"AnimalAttackDamageMixin",
+		"BlockItemPlacementMixin",
 		"AbstractFishAttackDamageMixin",
 		"AvoidEntityGoalMixin",
 		"MobPassiveAggressionMixin",

@@ -350,6 +350,15 @@ and `Mob.doHurtTarget` reads it first thing, so an armed cow without it crashes 
 See `entropy-effects` 1aj-1am, including why the install point is `Mob`'s constructor
 rather than `registerGoals`.
 
+**1ar-1aw. To change what a block PLACEMENT writes, modify the argument at `place`'s one
+`placeBlock` call — never `getPlacementState`** (`StandingAndWallBlockItem` overrides it and
+never calls super, so torches, signs and banners would silently escape). Replacing the state
+*before* `setBlock` means the original block entity is never created, so there is nothing to
+destroy; a chest item carries no contents, and the only real casualty is a **shulker box**,
+whose contents live in the item. Separately: **item components are datapack-bound, so a
+harness cannot construct an `ItemStack` at all** — design item predicates to take the
+component value, not the stack. See `entropy-effects` 1ar-1aw.
+
 **1an-1aq. FISH ARE NOT `Animal`, and an owner you have to RESOLVE is an owner you can
 lose.** `Cod -> AbstractFish -> WaterAnimal -> PathfinderMob` never passes through `Animal`,
 so a second attribute injection was needed; `Squid.travel(Vec3)` discards its argument

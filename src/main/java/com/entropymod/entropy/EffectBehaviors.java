@@ -93,6 +93,8 @@ public final class EffectBehaviors {
 		register(VampireRulesBehavior.ID, new VampireRulesBehavior());
 		register(EarthquakeBehavior.ID, new EarthquakeBehavior());
 		register(BeastWrathBehavior.ID, new BeastWrathBehavior());
+		register(ReverseMidasBehavior.ID, new ReverseMidasBehavior());
+		register(GraveRobberBehavior.ID, new GraveRobberBehavior());
 
 		// TODO: Tiers 2-4 + odd/signature effects, same one-line-per-effect pattern.
 	}

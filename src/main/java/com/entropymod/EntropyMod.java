@@ -4,6 +4,7 @@ import com.entropymod.command.EntropyCommands;
 import com.entropymod.entropy.EffectBehaviors;
 import com.entropymod.entropy.EntropyAttributes;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.loot.GraveRobberDrops;
 import com.entropymod.entropy.growth.BlightTouchedTrample;
 import com.entropymod.entropy.growth.DangerSenseGlow;
 import com.entropymod.entropy.growth.GreenThumbGrowth;
@@ -23,6 +24,7 @@ import com.entropymod.network.RerollRequestPayload;
 import com.entropymod.network.RunSyncPayload;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityLevelChangeEvents;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -152,6 +154,11 @@ public class EntropyMod implements ModInitializer {
 		// NOTE: there is no Entity.getServer() in this mapping. ServerPlayer.level()
 		// returns ServerLevel covariantly, so level().getServer() is the accessor --
 		// see the CLAUDE.md mapping note.
+		// Grave Robber: a real Fabric event, so no mixin and nothing intercepted on
+		// the death path -- the bonus is an independent second roll of the mob's
+		// own loot table. Returns before touching the entity when nobody holds it.
+		ServerLivingEntityEvents.AFTER_DEATH.register(GraveRobberDrops::onDeath);
+
 		ServerPlayerEvents.JOIN.register(EntropyMod::reapplyTo);
 
 		ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> reapplyTo(newPlayer));

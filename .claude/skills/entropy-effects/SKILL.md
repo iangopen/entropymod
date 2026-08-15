@@ -5007,3 +5007,214 @@ on contact through its own puffing behaviour, and it now also gets an attack goa
 breaks and no crash is possible, but it is the one species whose felt danger is meaningfully
 above the 2.0 the number implies. Worth watching in play before deciding whether it needs
 its own value.
+
+---
+
+### Reverse Midas and Grave Robber — findings 1ar-1aw
+Registry is now **61 effects (31 GOOD / 30 BAD)**. Two Tier 2 effects in different
+categories (UTILITY / COMBAT), so a run may hold both.
+
+#### 1ar. ⚑ THERE IS NO BLOCK-PLACE EVENT, AND `getPlacementState` IS FAILURE MODE 1
+Fabric API's block surface is `UseBlockCallback` and `BlockEvents.USE_ITEM_ON` /
+`USE_WITHOUT_ITEM` — all of which fire *before* the item acts and can only **cancel**,
+never rewrite what gets placed. Confirmed by scanning every `*Events`/`*Callback` class in
+the shipped Fabric API jars. So any "change what is placed" effect is mixin-only.
+
+**The obvious target is `BlockItem.getPlacementState`, and it is wrong.** Two vanilla
+subclasses override it — `GameMasterBlockItem` and **`StandingAndWallBlockItem`** — and the
+latter's override contains **zero** `invokespecial` back to super. That class is torches,
+signs, banners and every wall-mountable block, so an injection there builds green, applies
+cleanly, and **silently exempts a large and very visible slice of the game**. It would have
+read as "the effect works, except sometimes".
+
+**The right target is the call site inside `place`.** javap-verified:
+
+| fact | why it matters |
+|---|---|
+| `BlockItem.place(BlockPlaceContext)` is overridden by **nobody** | no subclass trap at the outer level |
+| it has exactly **one** overload | `method = "place"` is unambiguous |
+| it calls `placeBlock` exactly **once**, at offset 63 | `@ModifyArg` needs a single call site |
+| the state passed there is whatever `getPlacementState` returned | **including a subclass's override**, so this catches what the other target misses |
+
+So `@ModifyArg(index = 1)` on that call catches every placement regardless of which
+subclass computed the state — the same "modify the argument at the one call site" shape as
+Behemoth Gauntlets.
+
+#### 1as. ⚑ BEFORE BEATS AFTER, AND THE REASON IS THE THING YOU WOULD OTHERWISE DESTROY
+The timing question answers itself once the downstream sequence is read. `place` continues,
+after `placeBlock`:
+
+```
+101: level.getBlockState(pos)                    -> local 8, the world state
+109: worldState.is(placementState.getBlock())    -> branch
+118:   updateBlockStateFromTag
+132:   updateCustomBlockEntityTag                -> writes the item's stored NBT into the block entity
+       updateBlockEntityComponents
+       setPlacedBy
+197: local8.getSoundType() ... playSound         <- the WORLD state
+248: GameEvent.BLOCK_PLACE with local 8          <- the WORLD state
+256: stack.consume(1, player)
+```
+
+**Swapping AFTER placement means the real block genuinely exists for an instant**: a chest
+block entity is created, the item's stored data is copied into it, `setPlacedBy` runs — and
+only then is all of it deleted. Every one of those steps is work whose sole product is
+something to destroy, and the destruction is the part that can go wrong.
+
+**Replacing the state BEFORE `setBlock` means the block entity is never created at all**, so
+there is nothing in the world to lose. Three things then fall out for free and were verified
+rather than hoped:
+
+- The offset-109 branch compares **gold against gold** (the placement state is now gold), so
+  it is *taken* — and every call inside it no-ops anyway, because
+  `updateCustomBlockEntityTag` returns at its own `getBlockEntity(pos) == null` check
+  (offset 35) and `Blocks.GOLD_BLOCK` does not override `setPlacedBy`. Nothing throws and
+  nothing is half-applied.
+- **The placement sound and the `BLOCK_PLACE` game event both read the re-read world state**,
+  so a gold block sounds like a gold block with no code of ours.
+- Gold has no support requirement, so a placement validated for a torch can never fail to
+  survive as gold.
+
+**Known cosmetic gap, and it is vanilla behaving normally.** The gating is server-side, so
+the placing client predicts the *real* block and the server's update corrects it within a
+tick — the Slashed Pockets desync, resolved the same way. The placer also hears their
+predicted **original** block's sound, because vanilla's own `playSound` call in `place`
+passes the player as the entity to **exclude** (1ad). Bystanders hear gold.
+
+#### 1at. ⚑ A CHEST ITEM CARRIES NO CONTENTS — the NBT risk is SHULKER BOXES, and only those
+The brief asked whether converting a placed chest destroys its contents. **It cannot, and
+the reason corrects the question:** a chest's inventory only ever exists in the world. The
+item carries nothing, and under this effect the chest never reaches the world — the player
+loses one chest item exactly as they lose one dirt block. Same for furnaces, hoppers,
+droppers and every other ordinary block entity.
+
+**The one genuine casualty is an item that stores a container inside *itself*.** A shulker
+box carries `DataComponents.CONTAINER` (an `ItemContainerContents`), and placing it consumes
+the stack — so up to 27 stacks of the player's own collected inventory would vanish
+**silently, from one misclick, with no feedback and no way back**.
+
+**Shipped with a carve-out, deliberately, and this is a judgement not a rule.** Blight
+Touched's "any crop, no exceptions" precedent is about destroying *a world block the player
+can replant*; this would be destroying *the player's collected inventory*. There is no
+counterplay to a shulker that evaporates. So `EffectHooks.sparesStoredContents` lets a stack
+with non-empty container contents place normally. It is:
+
+- **one predicate, not an item list**, so any modded container item is covered;
+- keyed on **contents, not type**, so an *empty* shulker box is turned to gold like anything
+  else;
+- **one call**, so deleting it gives the literal no-exceptions version.
+
+#### 1au. ⚑ ITEM COMPONENTS ARE DATAPACK-BOUND — you cannot build an `ItemStack` headlessly
+Hit while trying to test the above with real stacks, and worth recording because the failure
+looks like a harness bug and is not one.
+
+```
+NullPointerException: Components not bound yet
+  at Holder$Reference.components(Holder.java:278)
+  at ItemStack.<init>(ItemStack.java:266)
+```
+
+`ItemStack`'s constructor reads `holder.components()`, and **nothing in
+`Bootstrap.bootStrap()` populates it** — item components arrive from a resource reload in
+this version. The obvious repair is to bind them from the item itself; **that does not work
+either, because `Item.components()` delegates straight back to the same unbound holder**
+(verified: the fix threw at the identical line, one frame deeper).
+
+> **Rule: a harness can construct attributes, tags, codecs and loot keys, but not
+> `ItemStack`s. Design any item-facing predicate so the decision takes the component VALUE
+> rather than the stack** — `ItemContainerContents` is a plain object needing no registry, so
+> `carriesStoredContents(ItemContainerContents)` is fully drivable while
+> `sparesStoredContents(ItemStack)` is a one-line shell. Same discipline as Clumsy Digger
+> reading shipped tag JSON instead of evaluating `stack.is(tag)`.
+
+#### 1av. Scoping: a dispenser has a NULL player, so it is excluded by construction
+`DirectionalPlaceContext`'s constructor passes `aconst_null` for the player (javap-verified),
+so `context.getPlayer()` is null for every dispenser placement and the ordinary null check
+drops it. **No block-source test was needed** — the exclusion is structural rather than a
+check that could be forgotten. Another player building alongside is unaffected by the usual
+per-player acquired-set read.
+
+#### 1aw. Two Reverse Midas consequences that are severe, and are DESIGN not bugs
+Both stated rather than tuned away, because the spec is "every block, no exceptions" and the
+interesting failure here is a design one.
+
+- **It is also a gold generator.** Gold blocks drop themselves, so: place dirt, break the
+  gold block, keep it — **a net gain of one gold block (nine ingots) per placement**. Gold is
+  a weak material, but piglin bartering converts it into **ender pearls**, i.e. a shortcut to
+  this run's actual win condition. Not cleanly fixable: suppressing the drop would need
+  per-block world state recording which gold blocks this effect created.
+- **It blocks progression harder than it reads.** No crafting table, no furnace, no bed, no
+  chest and **no obsidian** can ever be placed again, so the run becomes dependent on
+  structures that already contain them.
+
+`counterplay = true` still holds — stop placing blocks, and the gold is minable — but this is
+the effect most likely to want a second look in play.
+
+---
+
+#### Grave Robber: the bonus is vanilla's OWN second roll
+The design question was what to drop. **A second roll of the dead mob's own loot table**, via
+a *public* vanilla overload that already exists:
+
+```java
+LivingEntity.dropFromLootTable(ServerLevel, DamageSource, boolean playerKill,
+                               ResourceKey<LootTable>, Consumer<ItemStack>)
+```
+
+Its body builds exactly the `LootParams` the death drop used — `THIS_ENTITY`, `ORIGIN`,
+`DAMAGE_SOURCE`, `ATTACKING_ENTITY`, `DIRECT_ATTACKING_ENTITY` and `getLastHurtByPlayer()` —
+and the `Consumer` overload means the stacks arrive **in hand rather than in the world**, so
+one can be chosen instead of doubling the roll. Nothing is reimplemented, no new loot table
+exists, and Looting, the killer's weapon, difficulty and datapack edits are all honoured for
+free. **Same pattern as Green Thumb: drive the schedule yourself, perform the change through
+vanilla's own transition.**
+
+`playerKill` mirrors vanilla's own derivation (`dropAllDeathLoot` uses
+`lastHurtByPlayerMemoryTime`; `getLastHurtByPlayer() != null` is the public expression), so
+the *same pool* is rolled — getting it wrong would silently change what drops.
+
+**Radius 16.0, and it is vanilla's number — with a caveat that had to be measured.**
+`Mob.createMobAttributes()`'s `FOLLOW_RANGE` baseline is 16.0, so "near" means "close enough
+that the mob was engaging you". Probed against the real suppliers rather than assumed:
+
+| mob | FOLLOW_RANGE |
+|---|---|
+| creeper, skeleton, spider, cow | **16.0** — the baseline |
+| **zombie** | **35.0** — a real override |
+| the *attribute's* registered default | 32.0, used by nobody |
+
+**The first draft of the harness check asserted this against a zombie and failed.** 16 is the
+baseline engagement range, not a universal one; a zombie can engage from beyond the radius
+and die outside it. Recorded because reading the attribute default instead of the supplier is
+the mistake that already cost Creeper Magnet a bug (1e), and this is the neighbouring one.
+
+Measured as a true sphere via `distanceToSqr`; a box would leak to `16 × √3 = 27.7` blocks,
+the same 73% over-range Danger Sense and Ore Sense guard against, and an extra drop looks
+identical whatever the distance was.
+
+**No kill attribution — proximity only.** It is *Grave Robber*, not *Executioner*: requiring
+the kill would make it a strict damage-dealing bonus, which is what Looting already is.
+Proximity gives it a different shape — a creeper killing a zombie beside you, a mob falling
+into your pit — and those are the moments that make it read as its own thing.
+
+**Chance 15%, and the farm question answered by the reward's SHAPE, not the rate.** A grinder
+keeps a player within 16 blocks of thousands of deaths an hour, so the proximity gate offers
+no protection at all. What protects it is that the payout is **a percentage of what the mob
+already gives**: one stack from a second roll works out around **+10-15% yield**, well under a
+Looting III sword and inside ordinary session variance. It **cannot introduce a resource the
+mob does not already drop**, so no farm becomes a source of something new, and it grants **no
+experience** — the one reward an AFK farm converts most efficiently. Stated plainly: grinding
+does get modestly more lucrative and nothing prevents that; the judgement is that a
+sub-Looting-III bump is a felt bonus rather than a farming multiplier.
+
+15% is sized as a **discrete visible event** (the Butterfingers/Leaky Pockets class, not the
+Clumsy Digger class): P(at least one proc in a 5-mob fight) = **55.6%**, the lowest value that
+clears a coin flip per ordinary fight. Above Butterfingers' 10% on purpose — a curse is tuned
+so it does not dominate, a blessing so it does not disappear. The rate is asserted by driving
+200,000 uniform samples through the real predicate, not by restating the constant.
+
+**`chooseBonusIndex` clamps a roll of exactly `1.0f`** to the last index. Reachable for a
+float sample, and it would be an `IndexOutOfBoundsException` on a live server rather than a
+wrong item. An empty second roll drops nothing and is **not re-rolled** — a mob that
+genuinely rolled nothing has nothing extra to give — and it logs, because "procced but rolled
+empty" and "never procced" are indistinguishable from the player's seat.

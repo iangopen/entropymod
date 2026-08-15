@@ -31,6 +31,12 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.item.component.ItemContainerContents;
+import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import com.entropymod.entropy.behavior.ReverseMidasBehavior;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityReference;
 import net.minecraft.world.entity.LivingEntity;
@@ -244,6 +250,100 @@ public final class EffectHooks {
 		}
 		EntityReference<LivingEntity> owner = tamable.getOwnerReference();
 		return owner != null && owner.matches(player);
+	}
+
+	/**
+	 * The state a placement should actually write (Reverse Midas). Returns
+	 * {@code state} unchanged for everyone and everything except a holder placing
+	 * an ordinary block, in which case it returns a gold block.
+	 *
+	 * <p>Called from {@code BlockItemPlacementMixin} as the sole argument
+	 * modification at {@code BlockItem.place}'s one {@code placeBlock} call, so
+	 * this is the single place every gate for the effect lives.
+	 *
+	 * <p><b>Server-side only, deliberately.</b> The placing client predicts the
+	 * placement locally and will briefly show the real block before the server's
+	 * block update corrects it to gold -- the same one-frame cosmetic desync
+	 * Slashed Pockets documents, and resolved the same way: the server is
+	 * authoritative and the visual settles within a tick. The placer also hears
+	 * their client-predicted <i>original</i> block's sound, because vanilla's own
+	 * {@code Level.playSound} call in {@code place} passes the player as the
+	 * entity to <b>exclude</b> (CLAUDE.md 1ad) -- that is vanilla behaving
+	 * normally for a predicted action, not a bug in this effect. Bystanders hear
+	 * gold.
+	 *
+	 * <p><b>A null player is a dispenser and is left alone.</b>
+	 * {@code DirectionalPlaceContext}'s constructor passes {@code aconst_null} for
+	 * the player, so this needs no block-source test -- dispenser placement is
+	 * excluded by construction rather than by a check that could be forgotten.
+	 *
+	 * @see #sparesStoredContents for the one carve-out and why it exists
+	 */
+	public static BlockState reverseMidasPlacement(BlockPlaceContext context, BlockState state) {
+		if (!(context.getLevel() instanceof ServerLevel)) {
+			return state;
+		}
+		Player player = context.getPlayer();
+		if (player == null) {
+			return state;
+		}
+		AcquiredEffects acquired = acquired(player);
+		if (acquired == null || !acquired.contains(ReverseMidasBehavior.ID)) {
+			return state;
+		}
+		if (sparesStoredContents(context.getItemInHand())) {
+			return state;
+		}
+		return Blocks.GOLD_BLOCK.defaultBlockState();
+	}
+
+	/**
+	 * True if this stack carries a container's contents inside <i>itself</i>, and
+	 * so must be allowed to place normally.
+	 *
+	 * <p><b>The only carve-out in Reverse Midas, and the reasoning is worth
+	 * keeping.</b> The intuition is that placing a chest under this curse destroys
+	 * the chest's contents. It cannot: a chest item carries nothing, its inventory
+	 * only ever exists in the world, and under this effect the chest never reaches
+	 * the world -- the player loses one chest item, exactly as they lose one dirt
+	 * block. Verified downstream too: vanilla's post-placement
+	 * {@code updateCustomBlockEntityTag} returns at its own
+	 * {@code getBlockEntity(pos) == null} check, so nothing is half-written.
+	 *
+	 * <p>A <b>shulker box</b> is the genuine exception. Its contents live in the
+	 * item as {@code DataComponents.CONTAINER}, and placing it consumes the stack
+	 * -- so up to 27 stacks of the player's own collected inventory would vanish
+	 * silently, from one misclick, with no feedback and no way back. That is a
+	 * different category from Blight Touched's "any crop, no exceptions": a crop
+	 * is a world block the player can replant.
+	 *
+	 * <p>So this is checked, and it is one predicate rather than an item list, so
+	 * any modded container item is covered too. <b>Removing this single call gives
+	 * the literal no-exceptions version of the effect.</b> An <i>empty</i> shulker
+	 * box has nothing to lose and is turned to gold like anything else.
+	 */
+	public static boolean sparesStoredContents(ItemStack stack) {
+		return carriesStoredContents(stack.get(DataComponents.CONTAINER));
+	}
+
+	/**
+	 * The carve-out's actual decision, split off the {@code ItemStack} so it can be
+	 * driven headlessly.
+	 *
+	 * <p>Necessary rather than tidy: <b>item components are datapack-bound in this
+	 * version</b>, so {@code new ItemStack(Items.CHEST)} throws
+	 * {@code NullPointerException: Components not bound yet} in a bootstrapped
+	 * harness, and {@code Item.components()} cannot be used to repair it because it
+	 * delegates straight back to the same unbound holder. Keeping the rule on a
+	 * plain component value leaves it testable.
+	 *
+	 * <p>Null means the item declares no container at all -- a chest, a furnace,
+	 * every ordinary block. Present-but-empty means an empty shulker box, which has
+	 * nothing to lose and is turned to gold like anything else. Only actual stored
+	 * items buy the exemption.
+	 */
+	public static boolean carriesStoredContents(ItemContainerContents contents) {
+		return contents != null && contents.nonEmptyItems().iterator().hasNext();
 	}
 
 	/**

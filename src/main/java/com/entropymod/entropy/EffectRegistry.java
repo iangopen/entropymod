@@ -12,10 +12,11 @@ import java.util.stream.Collectors;
  * need to be added -- the timer, GUI, and networking code never change when you
  * add effect #47.
  *
- * <p><b>Current content: 49 effects — 23 GOOD and 26 BAD, all permanent.</b>
- * Tier 1 is 34 (17 GOOD / 17 BAD) at entropy 0-25; Tier 2 is 15 at entropy
- * 25-50, plus Glass Cannon Pact at 40-60. It is a baseline, not the finished
- * game: Tiers 3-4 and the odd/signature effects still slot in the same way.
+ * <p><b>Current content: 61 effects — 31 GOOD and 30 BAD, all permanent.</b>
+ * Tier 1 is 34 (17 GOOD / 17 BAD) at entropy 0-25; the rest are Tier 2 at
+ * entropy 25-50, plus Glass Cannon Pact, Unstable and Earthquake at 40-60. It is
+ * a baseline, not the finished game: Tiers 3-4 and the odd/signature effects
+ * still slot in the same way.
  *
  * <p>Every effect is permanent — see {@link EffectDefinition} for why there is
  * no duration field.
@@ -237,6 +238,17 @@ public final class EffectRegistry {
 				"Passive animals and fish turn on you -- even wild wolves and cats. "
 						+ "Your own tamed animals stay loyal",
 				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
+
+		// Counterplay is true: you can simply stop placing blocks, and the gold
+		// block is minable. See ReverseMidasBehavior for the two severe knock-on
+		// consequences (a gold generator, and no crafting table/furnace/bed ever).
+		register("reverse_midas", "Reverse Midas",
+				"Every block you place turns to gold as it leaves your hand",
+				EffectCategory.UTILITY, EffectPhase.BAD, 25, 50, true);
+
+		register("grave_robber", "Grave Robber",
+				"Mobs dying near you sometimes give up one extra piece of their loot",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 25, 50, true);
 
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.
