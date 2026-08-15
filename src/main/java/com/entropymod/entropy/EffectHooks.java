@@ -5,6 +5,7 @@ import com.entropymod.entropy.behavior.BadReputationBehavior;
 import com.entropymod.entropy.behavior.BehemothGauntletsBehavior;
 import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
 import com.entropymod.entropy.behavior.BeastWhispererBehavior;
+import com.entropymod.entropy.behavior.BeastWrathBehavior;
 import com.entropymod.entropy.behavior.ClumsyDiggerBehavior;
 import com.entropymod.entropy.behavior.CrouchInvincibilityBehavior;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
@@ -173,6 +174,35 @@ public final class EffectHooks {
 		return entity instanceof Player player
 				&& acquired(player) != null
 				&& acquired(player).contains(BeastWhispererBehavior.ID);
+	}
+
+	/**
+	 * True if passive animals should treat this entity as prey (Beast Wrath). Read
+	 * by the {@code TargetingConditions.Selector} that {@code MobPassiveAggressionMixin}
+	 * hands to every animal's {@code NearestAttackableTargetGoal}.
+	 *
+	 * <p><b>This is the whole of the effect's player-scoping.</b> The selector runs
+	 * per candidate during target <i>selection</i>, so an animal never picks a
+	 * player without the effect as a target at all -- there is no already-chosen
+	 * victim to re-check later. A second player standing in the same field is
+	 * invisible to the goal.
+	 *
+	 * <p>Takes an {@code Entity} for the same reason {@link #suppressesFleeing}
+	 * does: the call site holds a {@code LivingEntity} candidate, and keeping the
+	 * {@code instanceof} here keeps the mixin to one line.
+	 *
+	 * <p><b>Deliberately does not check creative or spectator mode.</b> That was
+	 * tried and removed as redundant: {@code TargetingConditions.test} calls this
+	 * selector at offset 29 and then {@code canBeSeenByAnyone()} and
+	 * {@code canBeSeenAsEnemy()} at 8 and 51, and the latter is
+	 * {@code !isInvulnerable() && canBeSeenByAnyone()} -- which already excludes
+	 * spectators and creative players, since a creative player is invulnerable.
+	 * Restating it here would be a second copy of a rule vanilla already enforces.
+	 */
+	public static boolean attractsAnimalAggression(Entity entity) {
+		return entity instanceof Player player
+				&& acquired(player) != null
+				&& acquired(player).contains(BeastWrathBehavior.ID);
 	}
 
 	/**

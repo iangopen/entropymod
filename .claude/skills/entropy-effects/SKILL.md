@@ -4651,3 +4651,183 @@ inlines it at the call site and no reference to the name survives in the constan
 pool** — the same inlining trap `Checks.hasConstant` exists for on the mod's own side,
 reached from the vanilla direction. What is checkable is the *dispatch method*
 (`levelEvent`, a UTF8 method entry) plus the vanilla constant's value read by reflection.
+
+---
+
+### Beast Wrath — passive animals attack the holder (BAD / COMBAT, 25-50)
+Registry is now **59 effects**. Findings 1aj-1am. **1aj is the durable one: it is the
+first effect in the project that had to ADD behaviour to a mob rather than veto it, and
+the two are structurally different problems.**
+
+#### 1aj. SUPPRESSING A GOAL AND ADDING ONE ARE NOT THE SAME SHAPE — Beast Whisperer does NOT transfer
+Beast Whisperer was the obvious precedent and the brief asked explicitly whether it
+carries over. **It does not**, and the reason is worth stating because "scope it to one
+player with a gate on the resolved target" reads like it should be reusable.
+
+Beast Whisperer works by **vetoing a goal that already exists and has already resolved a
+target**. `PanicGoal.shouldPanic` and `AvoidEntityGoal.canUse` both run on a cow every
+tick anyway, and both hand you the entity they are reacting to — so a one-line gate on
+that entity is the whole implementation, with no species list and nothing added to the
+mob.
+
+**Aggression has no goal to veto.** A cow's `targetSelector` is *empty* and its
+`goalSelector` holds Float/Panic/Breed/Tempt/FollowParent/Stroll/LookAt/RandomLook. There
+is no attack goal and no target goal to intercept.
+
+> **Suppression is subtractive and needs only a predicate. Addition needs the goals to
+> exist first, an attribute they can read, and a decision about where in the entity's
+> lifecycle to install them — three problems the veto shape never has.**
+
+What *did* carry over is the **discipline, not the mechanism**: the gate is still on a
+resolved target rather than on the goal's existence, so the effect is still scoped to one
+player and still needs no per-species code.
+
+**The goals are NOT typed narrowly the way `TamableAnimal`'s owner goals are** — that was
+the brief's flagged risk (finding: `FollowOwnerGoal`/`OwnerHurtByTargetGoal` take
+`TamableAnimal`, which is what split the companion cluster into "free" and "build it").
+Here both take the broad types:
+
+```
+MeleeAttackGoal(PathfinderMob, double, boolean)
+NearestAttackableTargetGoal(Mob, Class<T>, int, boolean, boolean, TargetingConditions.Selector)
+```
+
+Every animal is a `PathfinderMob` (`Cow -> AbstractCow -> Animal -> AgeableMob ->
+PathfinderMob -> Mob`), so both construct for a cow exactly as for a zombie, and
+**nothing in either class consults hostility**. Vanilla's own killer bunny is the
+precedent: an ordinary `Animal` carrying stock attack goals.
+
+#### 1ak. A MISSING ATTRIBUTE IS AN ABSENCE, NOT A ZERO — and reading it THROWS
+The single finding that shaped the implementation, and the one that would have shipped as
+a server crash rather than as a quiet no-op.
+
+**`ATTACK_DAMAGE` is absent from every supplier in a passive animal's chain**, verified
+against the shipped classes rather than assumed: `LivingEntity.createLivingAttributes()`
+holds 21 attributes and `ATTACK_KNOCKBACK` is among them while `ATTACK_DAMAGE` is not;
+`Mob.createMobAttributes()` adds only `FOLLOW_RANGE`; `Animal.createAnimalAttributes()`
+adds only `TEMPT_RANGE`. Two hard consequences:
+
+| call | result |
+|---|---|
+| `cow.getAttribute(ATTACK_DAMAGE)` | **null** — `AttributeMap.getInstance` is `computeIfAbsent(holder, supplier::createInstance)` and `AttributeSupplier.createInstance` returns null for an attribute it does not hold |
+| `cow.getAttributeValue(ATTACK_DAMAGE)` | **throws `IllegalArgumentException`** — `AttributeMap.getValue` falls through to `AttributeSupplier.getValue` to the private `getAttributeInstance`, which throws on a miss rather than returning the default |
+
+**So the project's universal `addOrUpdateTransientModifier` route is simply
+unavailable** — there is no instance to attach a modifier to. And `Mob.doHurtTarget`
+reads `ATTACK_DAMAGE` on its *first* instruction, so **an armed cow without the attribute
+takes the server tick down on its first landed hit.** Granting it is not tuning; without
+it the effect is a crash.
+
+The value therefore has to come from the **supplier**, which is built once per
+`EntityType` at bootstrap and is immutable afterwards — hence `AnimalAttackDamageMixin`
+on `Animal.createAnimalAttributes()` (RETURN). Three properties make that one injection
+sufficient and safe:
+
+- **One method covers every species with no list.** Cow (via `AbstractCow`), Pig,
+  Chicken, Sheep and Rabbit were each checked in bytecode and all five open
+  `createAttributes` with `invokestatic Animal.createAnimalAttributes`. Same discovery as
+  `AvoidEntityGoal` being one parameterised class; anything added later inherits it free.
+  (Mapping note: the species moved into per-animal subpackages —
+  `animal.cow.Cow`, `animal.pig.Pig`, `animal.chicken.Chicken`, `animal.sheep.Sheep`,
+  `animal.rabbit.Rabbit`. `javap` on the old flat `animal.Pig` fails as "class not
+  found", which reads like a wrong name rather than a wrong package.)
+- **It cannot corrupt an animal that already has attack damage.**
+  `AttributeSupplier.Builder.build()` finishes with Guava's **`buildKeepingLast()`**, so
+  duplicate keys are legal and the *last* put wins. Ours lands at the bottom of the chain
+  and a wolf's (4.0) or rabbit's (3.0) own later `add` overwrites it. Both asserted
+  against the real suppliers.
+- **An always-on attribute is not an always-on effect.** It is inert unless something
+  attacks with it. This is vanilla's own pattern: every rabbit alive carries
+  `ATTACK_DAMAGE` 3.0 and only the killer bunny has a goal that reads it.
+
+#### 1al. The install point is the CONSTRUCTOR, because `registerGoals` is failure mode 1
+`Mob.registerGoals` is the obvious target and it is CLAUDE.md's first failure mode.
+**`Animal`, `AgeableMob` and `PathfinderMob` each declare NO `registerGoals`** (`javap |
+grep -c` returns 0 for all three) — Cow, Pig, Chicken, Sheep and Rabbit override `Mob`'s
+empty base *directly*, and an override of an empty base has no reason to call `super`. A
+mixin there would apply cleanly and never run for a single animal.
+
+`Mob`'s constructor cannot be overridden, has exactly one descriptor
+(`(EntityType<? extends Mob>, Level)`), and javap-verified calls `registerGoals()` at
+**offset 146** behind an `instanceof ServerLevel` at 139, immediately before its **only**
+`return` at 149. So `@Inject(method = "<init>", at = @At("TAIL"))` binds that single
+return and runs **after the mob's own goals are registered** — which is what makes the
+eligibility test possible. (The `ServerLevel` check is repeated in the handler because
+TAIL fires either way.)
+
+**Eligibility is a definition, not a heuristic: `Animal` with an EMPTY `targetSelector`.**
+An entity with no target-selection goal has no way to acquire a target and therefore no
+way to attack anything — which is exactly what "normally passive" names. Wolves, polar
+bears and llamas carry a `HurtByTargetGoal` and are excluded **without being named**.
+
+**Goal priority is where the effect actually negotiates with vanilla**, and the numbers
+are read off the species rather than chosen:
+
+| priority | goal | consequence |
+|---|---|---|
+| 0 | `FloatGoal` | outranks the attack — none of them drown while angry |
+| 1 | `PanicGoal` | outranks it — a burning cow still runs for water |
+| **2** | **our `MeleeAttackGoal`** | |
+| 3 | `TemptGoal` | loses — **holding wheat does not pacify a hostile animal** |
+| 4 | `FollowParentGoal`, and **`Rabbit`'s `RabbitAvoidEntityGoal(Player.class)`** | loses |
+
+**Rabbit is the one species with an existing goal actively opposing the effect** — it
+avoids players at priority 4, javap-verified, and both goals need the MOVE flag, so the
+priority-2 attack goal preempts it and the rabbit attacks instead of fleeing. Worth
+knowing because it is the only species where the outcome is decided by the priority
+number rather than by an empty slot.
+
+**Nothing is added or removed when the effect is picked or lost.** The goals go on every
+eligible animal unconditionally and are **inert without a holder**: the selector chooses
+nothing, and `MeleeAttackGoal.canUse()` returns false on its `getTarget() == null`
+branch. That is deliberate — installing in `apply()` would have meant finding every
+loaded animal, handling ones that spawn or load later, and removing them again, i.e. **the
+entity-state idempotency trap of 1h** in a form with no `isFreshPick()` escape, because
+the state is on entities the player has never met.
+
+#### 1am. Damage 2.0, and a SWARM DOES NOT MULTIPLY — the i-frame ceiling sizes the number
+Vanilla anchors, read from the real suppliers: silverfish 1.0, spider 2.0, killer bunny
+3.0, zombie 3.0. **2.0 ships — one full heart, exactly a spider.**
+
+The reasoning that is not just "between the anchors":
+
+- A full heart clears the **perceptual-threshold bar** (failure mode 3 — Magnetic Boots
+  shipped a real change nobody could feel). Half a heart from a chicken reads as a bug.
+- Strictly below zombie/killer-bunny 3.0, so one cow is measurably less dangerous than
+  the weakest real hostile — which is what the brief asked for.
+- **`LivingEntity.INVULNERABLE_DURATION` is 20 ticks, so eight cows do NOT deal 16.0** —
+  a same-window hit only applies the amount *above* the last one. A herd delivers roughly
+  **2.0 per second between them**, so the per-hit number carries the entire difficulty of
+  the effect and sizing it as though a swarm stacked would have produced something far
+  too small to notice alone. **This is the same i-frame rule that put a floor under
+  Earthquake's two hits (1w), reached from the opposite direction: there it set a minimum
+  SEPARATION, here it sets a minimum MAGNITUDE.**
+
+`SPEED_MODIFIER` 1.2 puts a cow's pursuit at `0.2 × 1.2 = 0.24`, a shade over a zombie's
+0.23 — catches a walking player, never a sprinting one. With `mustSee = true` on the
+target goal, a wall or a closed door ends the pursuit outright, which is what makes
+`counterplay = true` honest at a 25-50 window.
+
+**Farming and breeding are untouched, and that was checked rather than assumed:** neither
+`Cow`, `AbstractCow` nor `Animal` contains a **single reference to `getTarget`** anywhere
+in the class. Hostility lives entirely in goal selection and interaction lives entirely in
+the use path; the two never meet, so **a cow chasing you can still be milked and still be
+fed into love mode, mid-pursuit.** Breeding completes normally — it needs the animal fed
+and in range, which is exactly where an attacking animal already is.
+
+**Scoping is in target SELECTION, not a post-hoc check.**
+`NearestAttackableTargetGoal`'s `TargetingConditions.Selector` is
+`(LivingEntity, ServerLevel) -> boolean`, evaluated per candidate, and
+`EffectHooks.attractsAnimalAggression` returns true only for a `Player` holding the
+effect. A second player in the world is **never selected in the first place**. The
+selector deliberately does **not** re-check creative/spectator: `TargetingConditions.test`
+already calls `canBeSeenAsEnemy()` (`!isInvulnerable() && canBeSeenByAnyone()`), which
+excludes spectators and creative players — restating it would be a second copy of a rule
+vanilla enforces, and 1s is the record of what happens when `isInvulnerable` is treated as
+a damage decision rather than as the targetability declaration it is.
+
+**Interaction with Beast Whisperer, stated because both are holdable at once** (COMPANION
+vs COMBAT, so anti-stacking never separates them): the Whisperer suppresses `PanicGoal`
+and `AvoidEntityGoal` for its holder while Beast Wrath adds attack goals, so a run holding
+both faces animals that neither flee nor panic and do attack. Coherent rather than
+contradictory — the two effects act on different goals and neither reads the other.

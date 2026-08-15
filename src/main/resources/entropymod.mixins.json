@@ -4,7 +4,9 @@
 	"compatibilityLevel": "JAVA_25",
 	"mixins": [
 		"EntropyModMixin",
+		"AnimalAttackDamageMixin",
 		"AvoidEntityGoalMixin",
+		"MobPassiveAggressionMixin",
 		"ItemStackDurabilityMixin",
 		"LlamaStrengthAccessor",
 		"EntityStepSoundMixin",

@@ -340,6 +340,16 @@ player delivers the cue to every bystander and never to them. `levelEvent`'s 3-a
 overload is safe by construction; **`playSound` has no safe overload.** Regression-tested
 by `Checks.methodPushesExplicitNull`, which decodes bytecode rather than scanning it.
 
+**1aj-1am. Adding a goal is not the inverse of vetoing one, and a MISSING attribute is not
+a zero.** Beast Whisperer's shape does not transfer to Beast Wrath: vetoing a goal that has
+already resolved a target needs only a predicate, while *adding* aggression needs the goals
+to exist, an attribute they can read, and an install point. `ATTACK_DAMAGE` is absent from
+`LivingEntity`/`Mob`/`Animal`'s suppliers alike, so `getAttribute` returns **null** (no
+instance for `addOrUpdateTransientModifier` to touch) and `getAttributeValue` **throws** —
+and `Mob.doHurtTarget` reads it first thing, so an armed cow without it crashes the tick.
+See `entropy-effects` 1aj-1am, including why the install point is `Mob`'s constructor
+rather than `registerGoals`.
+
 **1z. The squared speed rule (1e/1l) is a MOB rule — it does NOT apply to players.**
 A mob's forward input is its own speed value (`Mob.setSpeed` also calls `setZza`); a
 player's comes from `ClientInput` as a normalised 1.0, so player ground speed is

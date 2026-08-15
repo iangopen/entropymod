@@ -42,6 +42,7 @@ import com.entropymod.entropy.behavior.TheEntourageBehavior;
 import com.entropymod.entropy.EntropyDamageTypes;
 import com.entropymod.entropy.HookEffectBehavior;
 import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
+import com.entropymod.entropy.behavior.BeastWrathBehavior;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.behavior.VampireRulesBehavior;
 import com.entropymod.entropy.quake.EarthquakeService;
@@ -154,6 +155,7 @@ public final class HarnessMain {
 		companionMotion();
 		companionGatherTrigger();
 		companionAudienceLook();
+		beastWrath();
 		System.exit(Checks.summary());
 	}
 
@@ -6134,6 +6136,174 @@ public final class HarnessMain {
 				"coming back the other way it re-freezes once inside the resume ring ("
 						+ sawFrozen + " frozen samples) -- the fix reorders the freeze, it "
 						+ "does not delete it");
+	}
+
+	/**
+	 * Beast Wrath -- passive animals attack the holder.
+	 *
+	 * <p>The interesting checks here are the ones that pin the <b>vanilla</b> facts
+	 * the implementation rests on, against the real shipped classes. Mixins are not
+	 * applied in the harness, so these assert the world <i>before</i> the mixin --
+	 * which is exactly what has to stay true for the mixin to be correct, and what
+	 * will change silently under a version bump if it ever stops being true.
+	 */
+	private static void beastWrath() {
+		section("Beast Wrath: passive animals turn hostile");
+		HarnessBootstrap.init();
+
+		// ---------- wiring ---------------------------------------------------------
+		EffectDefinition def = EffectRegistry.byId(BeastWrathBehavior.ID);
+		check(def != null, "beast_wrath: registered in EffectRegistry");
+		check(EffectBehaviors.get(BeastWrathBehavior.ID) != null,
+				"beast_wrath: wired in EffectBehaviors");
+		if (def != null) {
+			check(def.minEntropy() == 25 && def.maxEntropy() == 50,
+					"beast_wrath: Tier 2 entropy window 25-50");
+			check(def.phase() == EffectPhase.BAD, "beast_wrath: BAD phase");
+			check(def.counterplay(),
+					"beast_wrath: counterplay = true -- required below entropy 40, and honest: "
+							+ "the animals need line of sight and are slower than a sprint");
+		}
+
+		// ---------- idempotency ----------------------------------------------------
+		check(EffectBehaviors.get(BeastWrathBehavior.ID) instanceof HookEffectBehavior,
+				"beast_wrath: is a HookEffectBehavior, so apply() is final and empty -- the "
+						+ "goals live on the mob from construction and are gated per tick, so "
+						+ "there is no per-player state to re-derive on respawn or rejoin");
+
+		// ---------- no-repeat ------------------------------------------------------
+		AcquiredEffects acquired = new AcquiredEffects();
+		acquired.add(BeastWrathBehavior.ID);
+		int sizeAfterFirst = acquired.size();
+		acquired.add(BeastWrathBehavior.ID);
+		check(acquired.size() == sizeAfterFirst,
+				"beast_wrath: re-adding is a no-op -- the acquired set IS the no-repeat rule");
+		for (int entropy : new int[] {25, 37, 50}) {
+			for (EffectPhase phase : EffectPhase.values()) {
+				EffectRegistry.RollResult roll = EffectRegistry.roll(
+						phase, entropy, new java.util.Random(99),
+						acquired.ids(), acquired.occupiedCategories());
+				if (roll.repeatFallback()) {
+					continue;
+				}
+				for (EffectDefinition offered : roll.choices()) {
+					check(!offered.id().equals(BeastWrathBehavior.ID),
+							"beast_wrath: not re-offered at entropy " + entropy + "/" + phase);
+				}
+			}
+		}
+
+		// ---------- persistence ----------------------------------------------------
+		AcquiredEffects reloaded = new AcquiredEffects();
+		for (String id : acquired.ids()) {
+			reloaded.add(id);
+		}
+		check(reloaded.contains(BeastWrathBehavior.ID),
+				"beast_wrath: survives an acquired-set round trip, so it is re-applied on load");
+
+		// ---------- THE VANILLA FACT THAT FORCED THE ATTRIBUTE MIXIN ---------------
+		// ATTACK_DAMAGE is absent from a passive animal's supplier. This is not a zero,
+		// it is an absence, and it is why addOrUpdateTransientModifier could not be
+		// used and why an ungated attack goal would crash the tick.
+		var attackDamage = net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE;
+		for (var type : List.of(
+				net.minecraft.world.entity.EntityType.COW,
+				net.minecraft.world.entity.EntityType.PIG,
+				net.minecraft.world.entity.EntityType.CHICKEN,
+				net.minecraft.world.entity.EntityType.SHEEP)) {
+			var supplier = net.minecraft.world.entity.ai.attributes.DefaultAttributes.getSupplier(type);
+			check(!supplier.hasAttribute(attackDamage),
+					type.toShortString() + ": vanilla supplier has NO ATTACK_DAMAGE -- the fact "
+							+ "AnimalAttackDamageMixin exists for. If this ever fails, the mixin "
+							+ "has become redundant and should be re-justified, not left in");
+			boolean threw = false;
+			try {
+				supplier.getValue(attackDamage);
+			} catch (RuntimeException e) {
+				threw = true;
+			}
+			check(threw,
+					type.toShortString() + ": reading the missing ATTACK_DAMAGE THROWS rather "
+							+ "than defaulting -- so an attack goal without the attribute mixin "
+							+ "takes the server tick down on the first landed hit");
+		}
+
+		// ...and the animals that DO define it, which is what makes buildKeepingLast()
+		// the load-bearing detail rather than a nicety.
+		for (var type : List.of(
+				net.minecraft.world.entity.EntityType.RABBIT,
+				net.minecraft.world.entity.EntityType.WOLF)) {
+			var supplier = net.minecraft.world.entity.ai.attributes.DefaultAttributes.getSupplier(type);
+			check(supplier.hasAttribute(attackDamage),
+					type.toShortString() + ": already defines its own ATTACK_DAMAGE ("
+							+ supplier.getValue(attackDamage) + "), added AFTER "
+							+ "createAnimalAttributes -- buildKeepingLast() keeps theirs, not ours");
+		}
+
+		// ---------- the damage number ----------------------------------------------
+		double damage = constant(BeastWrathBehavior.class, "ATTACK_DAMAGE");
+		checkNear(damage, 2.0, 1e-9, "beast_wrath: 2.0 attack damage -- one full heart per hit");
+		check(damage >= 1.0,
+				"...at or above silverfish's 1.0, so it clears the perceptual-threshold bar "
+						+ "that Magnetic Boots failed");
+		double zombie = net.minecraft.world.entity.ai.attributes.DefaultAttributes
+				.getSupplier(net.minecraft.world.entity.EntityType.ZOMBIE).getValue(attackDamage);
+		check(damage < zombie,
+				"...and strictly below a zombie's " + zombie + " read from the real supplier, so "
+						+ "one cow is measurably less dangerous than the weakest real hostile");
+		double rabbitDamage = net.minecraft.world.entity.ai.attributes.DefaultAttributes
+				.getSupplier(net.minecraft.world.entity.EntityType.RABBIT).getValue(attackDamage);
+		check(damage < rabbitDamage,
+				"...and below the killer bunny's " + rabbitDamage + " -- vanilla's own "
+						+ "passive-animal-with-attack-goals precedent");
+
+		// i-frames: the reason the per-hit number carries the whole weight.
+		int iFrames = (int) constant(net.minecraft.world.entity.LivingEntity.class,
+				"INVULNERABLE_DURATION");
+		check(iFrames == 20,
+				"a swarm does NOT stack: INVULNERABLE_DURATION is " + iFrames + " ticks, so eight "
+						+ "cows deal about " + damage + " per second between them, not "
+						+ (damage * 8) + " -- which is why the per-hit number had to carry the "
+						+ "whole difficulty");
+
+		// ---------- goal priorities -------------------------------------------------
+		// Vanilla's cow: 0 Float, 1 Panic, 2 Breed, 3 Tempt, 4 FollowParent, 5 Stroll.
+		int attackPriority = (int) constant(BeastWrathBehavior.class, "ATTACK_GOAL_PRIORITY");
+		check(attackPriority < 3,
+				"attack goal at priority " + attackPriority + " OUTRANKS TemptGoal (3), so "
+						+ "holding wheat does not pacify a hostile animal");
+		check(attackPriority > 1,
+				"...and is outranked by PanicGoal (1) and FloatGoal (0), so a burning cow still "
+						+ "runs for water and none of them drown while angry");
+
+		// ---------- scoping ---------------------------------------------------------
+		check(Checks.hasMethod(EffectHooks.class, "attractsAnimalAggression"),
+				"the per-player gate is a named method on EffectHooks, not inlined in the mixin");
+		check(Checks.classReferences(
+				com.entropymod.mixin.MobPassiveAggressionMixin.class, "attractsAnimalAggression"),
+				"the target goal's Selector calls it -- so the gate is on target SELECTION, "
+						+ "and a player without the effect is never chosen in the first place");
+		check(Checks.classReferences(
+				com.entropymod.mixin.MobPassiveAggressionMixin.class, "NearestAttackableTargetGoal"),
+				"...via a stock NearestAttackableTargetGoal, not a hand-rolled targeting loop");
+		check(!Checks.classReferences(
+				com.entropymod.mixin.MobPassiveAggressionMixin.class, "removeGoal"),
+				"the mixin never removes a goal: the goals are added once at construction and "
+						+ "are inert without a holder, so nothing is mutated when the effect is "
+						+ "picked or lost (the entity-state idempotency trap, CLAUDE.md 1h)");
+
+		// ---------- farming and breeding --------------------------------------------
+		// Checked rather than assumed: hostility lives in goal selection, interaction
+		// lives in the use path, and the two never meet.
+		for (Class<?> c : List.of(
+				net.minecraft.world.entity.animal.cow.Cow.class,
+				net.minecraft.world.entity.animal.cow.AbstractCow.class,
+				net.minecraft.world.entity.animal.Animal.class)) {
+			check(!Checks.classReferences(c, "getTarget"),
+					c.getSimpleName() + " contains NO reference to getTarget anywhere -- so "
+							+ "milking and breeding cannot consult hostility, and a cow chasing "
+							+ "you is still milkable mid-pursuit");
+		}
 	}
 
 	private HarnessMain() {}

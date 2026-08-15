@@ -230,6 +230,13 @@ public final class EffectRegistry {
 						+ "half-hearts of unblockable damage you cannot avoid",
 				EffectCategory.DEBUFF, EffectPhase.BAD, 40, 60, false);
 
+		// Counterplay is true and means it: the animals are slower than a sprinting
+		// player (0.24 against a sprint's 5.6 b/s), need line of sight to target at
+		// all, and a door or a two-block ledge ends the pursuit outright.
+		register("beast_wrath", "Beast Wrath",
+				"Cows, pigs, chickens, sheep and rabbits turn on you -- a heart a hit",
+				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
+
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.
 	}
