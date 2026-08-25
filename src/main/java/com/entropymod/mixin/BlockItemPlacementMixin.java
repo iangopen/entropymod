@@ -1,12 +1,15 @@
 package com.entropymod.mixin;
 
 import com.entropymod.entropy.EffectHooks;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Reverse Midas: replaces the state a placement is about to write with a gold
@@ -55,5 +58,29 @@ public abstract class BlockItemPlacementMixin {
 			index = 1)
 	private BlockState entropymod$placeGoldInstead(BlockPlaceContext context, BlockState state) {
 		return EffectHooks.reverseMidasPlacement(context, state);
+	}
+
+	/**
+	 * The AFTER half, for the three block families that write a <b>second</b> world
+	 * position: doors, beds and double plants.
+	 *
+	 * <p>For those the {@code @ModifyArg} above deliberately returns the state
+	 * unchanged, because it fires at offset 63 and the second cell is written from
+	 * {@code setPlacedBy} at offset 171 -- dispatched on whatever block ended up in
+	 * the world, so a gold state means gold's (empty) {@code setPlacedBy} runs and
+	 * the second cell is never written at all. Letting vanilla place the real block
+	 * keeps its facing, hinge side and half computation, and this converts both
+	 * cells before the call returns.
+	 *
+	 * <p>{@code RETURN} rather than {@code TAIL} because {@code place} has five
+	 * return sites; the four failure paths return {@code FAIL} and are dropped by
+	 * the {@code consumesAction()} test in the hook. As everywhere else in this
+	 * project, the mixin decides nothing -- see
+	 * {@link EffectHooks#reverseMidasAfterPlacement}.
+	 */
+	@Inject(method = "place", at = @At("RETURN"))
+	private void entropymod$goldBothHalves(
+			BlockPlaceContext context, CallbackInfoReturnable<InteractionResult> cir) {
+		EffectHooks.reverseMidasAfterPlacement(context, cir.getReturnValue());
 	}
 }

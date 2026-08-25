@@ -359,6 +359,16 @@ whose contents live in the item. Separately: **item components are datapack-boun
 harness cannot construct an `ItemStack` at all** — design item predicates to take the
 component value, not the stack. See `entropy-effects` 1ar-1aw.
 
+**1ax/1ay. A BEFORE hook is invisible to the SECOND cell a placement writes, and "has a
+golden equivalent" is a registry question.** Doors, beds and double plants write their other
+half from `setPlacedBy`, which `place` reaches at offset 171 — *after* the `@ModifyArg` at 63
+— and dispatches on the block that reached the world, so a gold state means gold's empty
+`setPlacedBy` runs and the second cell is **never written**: one gold block where two belong,
+with nothing in the log. Those three families (and only those — `PitcherCropBlock`'s override
+is a bare `return`) get a scoped AFTER exception. Separately, the gold-material blocks that
+preserve a *function* a gold block would destroy are three, not two: pressure plates, rails,
+and **`GOLDEN_DANDELION`**, which only exists in this version. See `entropy-effects` 1ax-1ay.
+
 **1an-1aq. FISH ARE NOT `Animal`, and an owner you have to RESOLVE is an owner you can
 lose.** `Cod -> AbstractFish -> WaterAnimal -> PathfinderMob` never passes through `Animal`,
 so a second attribute injection was needed; `Squid.travel(Vec3)` discards its argument

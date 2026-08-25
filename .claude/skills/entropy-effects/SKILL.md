@@ -5010,7 +5010,7 @@ its own value.
 
 ---
 
-### Reverse Midas and Grave Robber — findings 1ar-1aw
+### Reverse Midas and Grave Robber — findings 1ar-1ay
 Registry is now **61 effects (31 GOOD / 30 BAD)**. Two Tier 2 effects in different
 categories (UTILITY / COMBAT), so a run may hold both.
 
@@ -5152,6 +5152,138 @@ the effect most likely to want a second look in play.
 
 ---
 
+#### 1ax. A block whose placement writes TWO cells is invisible to a BEFORE hook — and the AFTER exception is scoped by a bytecode-derived list
+
+Reverse Midas shipped replacing the placement state at `BlockItem.place`'s one `placeBlock`
+call (offset 63). A door placed **one** gold block. So did a bed, and so did every double
+plant. Nothing was broken, nothing logged, and the mixin applied exactly as designed — this is
+CLAUDE.md failure mode 2 wearing a different coat: **the value was modified and a consumer
+further down never ran because of it.**
+
+**The order of operations, javap-verified:**
+
+| offset | in `BlockItem.place` |
+|---|---|
+| 63 | `placeBlock(context, state)` — **the `@ModifyArg`** |
+| 101 | re-read the world into local 8 |
+| 115 | branch on `worldState.is(placementState.getBlock())` |
+| **171** | `worldState.getBlock().setPlacedBy(...)` — **where the second cell is written** |
+
+Gold matches gold, so the branch *is* taken — and `setPlacedBy` is then dispatched on
+`Blocks.GOLD_BLOCK`, which does not override it. **The second cell was never written at all.**
+There is no injection failure to find here and no error to grep for.
+
+**The real list, from `setPlacedBy` bodies rather than from intuition.** Dump every
+`setPlacedBy` override in `net.minecraft.world.level.block` and read each body for a
+`Level.setBlock` at a *different* `BlockPos`. Seventeen classes declare the method; **three
+families actually write a second cell**:
+
+| block | second cell | items |
+|---|---|---|
+| `DoorBlock` (+`WeatheringCopperDoorBlock`) | `pos.above()`, `HALF=UPPER` | every wooden, iron and copper door |
+| `BedBlock` | `pos.relative(FACING)`, `PART=HEAD` | all 16 beds |
+| `DoublePlantBlock` (+`TallFlowerBlock`, `TallSeagrassBlock`, `SmallDripleafBlock`) | `pos.above()`, `HALF=UPPER` | tall grass, large fern, sunflower, lilac, rose bush, peony, tall seagrass, small dripleaf |
+
+**Two near misses, and inheritance gets one of them wrong:**
+
+- **`PitcherCropBlock` extends `DoublePlantBlock` and writes ONE cell.** It overrides
+  `setPlacedBy` with a bare `return` at offset 0 — a pitcher pod plants one cell and grows its
+  upper half later. Taking the class hierarchy at face value would have routed it down the
+  AFTER path for no reason.
+- **`MossyCarpetBlock` (pale moss carpet) writes a second cell *sometimes*.** Its `setPlacedBy`
+  may `setBlock(pos.above())`, but only a decorative topper, only when
+  `createTopperWithSideChance` returns non-air, and with a **random** per-side chance.
+  Excluded deliberately: that is optional growth, not the other half of one block, and
+  including it would make one carpet place one or two gold blocks depending on a die roll.
+
+**Two of the three families also do work in the ITEM, and it does not change the hook.**
+`BedItem.placeBlock` sets the foot itself (flag 26) and never calls super;
+`DoubleHighBlockItem.placeBlock` clears `pos.above()` to air or water before calling super.
+Both still receive the `@ModifyArg`'d state, because the modification is at the call site in
+`place` and dispatch is virtual. `BedItem` and `DoubleHighBlockItem` are the **only** two
+vanilla `placeBlock` overrides.
+
+**The fix is a scoped AFTER exception, and the scope is the point.** For those three families
+the `@ModifyArg` returns the state unchanged, vanilla places the real block with its own
+facing, hinge side and half computation, and a second one-line `@Inject` at `place`'s `RETURN`
+converts **both** cells. Everything else keeps the BEFORE path, where the original block
+entity is never created and there is nothing to destroy.
+
+Three things make the exception safe rather than a general fallback:
+
+- **The partner cell is read from the state vanilla wrote, never recomputed.** A bed uses
+  `BedBlock.getConnectedDirection`; a door or double plant reads the shared
+  `BlockStateProperties.DOUBLE_BLOCK_HALF` (`DoorBlock.HALF` and `DoublePlantBlock.HALF` are
+  the same property object, verified in both class initialisers). Nothing here can disagree
+  with vanilla's answer because nothing here computes one.
+- **The partner is converted only if it really holds the same block** — a second, cheaper
+  guard than the `PitcherCropBlock` exclusion, and the reason a family member that turns out
+  not to write a second cell degrades to a normal single conversion.
+- **Flags `UPDATE_ALL | UPDATE_KNOWN_SHAPE | UPDATE_SUPPRESS_DROPS`.** `UPDATE_KNOWN_SHAPE` is
+  load-bearing: without it the first `setBlock` tells the surviving half its partner is gone,
+  and a door half or plant half that hears that turns itself into air — a race that resolves
+  differently depending on which cell is written first. `UPDATE_SUPPRESS_DROPS` means that if
+  anything ever does destroy a half it cannot hand the item back, which would let the player
+  keep the door **and** get the gold.
+
+**One of the three has a block entity, and it is still fine.** `DoorBlock` and
+`DoublePlantBlock` are not `EntityBlock`s. `BedBlock` **is** — so the AFTER path really does
+create a `BedBlockEntity` and then destroy it. A bed's colour is the block, not its data, so
+the thing created and destroyed is empty. The shulker-box carve-out (1au) still runs first and
+is untouched.
+
+**The regression check that matters is not any of the per-block ones.** It walks the whole
+block registry, collects every class declaring `setPlacedBy`, and asserts the set is exactly
+the pinned seventeen. A version bump that introduces a **new** second-position writer fails
+there — otherwise it would place one gold block where two belong and look like nothing at all.
+
+#### 1ay. "Does a golden equivalent exist" is a registry question, and the answer is three rows — including one that only exists in this version
+
+The obvious guess for Reverse Midas's functional carve-outs is "pressure plate and rail".
+Reading `Blocks` instead of recalling it, the full set of **gold-material placeable blocks** is:
+`GOLD_BLOCK`, `RAW_GOLD_BLOCK`, `GOLD_ORE`, `DEEPSLATE_GOLD_ORE`, `NETHER_GOLD_ORE`,
+`GILDED_BLACKSTONE`, `LIGHT_WEIGHTED_PRESSURE_PLATE`, `POWERED_RAIL`, and **`GOLDEN_DANDELION`**
+(plus `POTTED_GOLDEN_DANDELION`, not placeable from an item).
+
+**`GOLDEN_DANDELION` is new in 26.1 and would not have been in a remembered list.** It is
+registered in `Blocks`'s class initialiser immediately before `torchflower` with the identical
+property chain (`mapColor(PLANT).noCollision().instabreak().sound(GRASS).offsetType(XZ)
+.pushReaction(DESTROY)`) and no feature flag — an ordinary small flower.
+
+**The inclusion rule that cut nine candidates to three: a pair is real only when a gold block
+would DESTROY the item's function.** A gold ore, a gilded blackstone and a raw gold block are
+full solid blocks, and so is the gold block the effect already places — substituting one
+changes the texture and nothing else, which is a palette swap, not a functional substitution.
+Only three name a shape a gold block cannot be:
+
+| placed | becomes | what a gold block would have cost |
+|---|---|---|
+| any `BasePressurePlateBlock` (stone, every wood, polished blackstone, the heavy/iron weighted plate) | `LIGHT_WEIGHTED_PRESSURE_PLATE` | a full block cannot be stood on to trigger anything |
+| any `BaseRailBlock` (`RailBlock`, `DetectorRailBlock`, `PoweredRailBlock` — which backs both the powered and the activator rail) | `POWERED_RAIL` | a full block is not track; the minecart stops |
+| `DANDELION` | `GOLDEN_DANDELION` | a full block is not a flower |
+
+Two scoping calls worth keeping:
+
+- **Dandelion only, not every flower.** That is the one exact species pair. A poppy's golden
+  counterpart does not exist, and mapping every flower onto this one would be inventing an
+  equivalence rather than finding one.
+- **The whole rail family, not just the plain rail.** Only `rail` is literally the gold recipe,
+  but the alternative for a detector rail is a solid gold block in the middle of the track,
+  which preserves strictly less of what the player was doing than "it is still a rail".
+
+**Place the substitute through its OWN `getStateForPlacement(context)`, never by copying the
+original's properties.** `RailBlock`'s `SHAPE` can be a curve (`NORTH_EAST`) that
+`PoweredRailBlock`'s straight-only property has no value for, so a property copy places a
+broken or default-facing block. Letting the golden block answer means it connects, waterlogs
+and faces the way vanilla would have placed it. Null means it declined; the default state
+still places.
+
+**Precedence is fixed and swept.** `EffectHooks.reverseMidasPlacement` consults, in order:
+the stored-contents carve-out, `goldenEquivalent`, `placesTwoPositions`, then plain gold. A
+registry sweep confirms the two tables are **disjoint** today (21 blocks golden, 46 two-cell),
+so the order changes no outcome now — it is fixed so a future addition to either table cannot
+make the answer depend on which check happened to be written first.
+
 #### Grave Robber: the bonus is vanilla's OWN second roll
 The design question was what to drop. **A second roll of the dead mob's own loot table**, via
 a *public* vanilla overload that already exists:
@@ -5197,21 +5329,48 @@ the kill would make it a strict damage-dealing bonus, which is what Looting alre
 Proximity gives it a different shape — a creeper killing a zombie beside you, a mob falling
 into your pit — and those are the moments that make it read as its own thing.
 
-**Chance 15%, and the farm question answered by the reward's SHAPE, not the rate.** A grinder
-keeps a player within 16 blocks of thousands of deaths an hour, so the proximity gate offers
-no protection at all. What protects it is that the payout is **a percentage of what the mob
-already gives**: one stack from a second roll works out around **+10-15% yield**, well under a
-Looting III sword and inside ordinary session variance. It **cannot introduce a resource the
-mob does not already drop**, so no farm becomes a source of something new, and it grants **no
-experience** — the one reward an AFK farm converts most efficiently. Stated plainly: grinding
-does get modestly more lucrative and nothing prevents that; the judgement is that a
-sub-Looting-III bump is a felt bonus rather than a farming multiplier.
+**Chance 30% (was 15%), and the farm question answered by the reward's SHAPE, not the rate.**
+A grinder keeps a player within 16 blocks of thousands of deaths an hour, so the proximity gate
+offers no protection at all. What protects it is that the payout is **a percentage of what the
+mob already gives**. That percentage is derived, not asserted: if a mob's death roll produces
+`k` stacks, one uniformly-chosen stack of an identical second roll is `1/k` of a roll in
+expectation, so the yield multiplier is **`1 + CHANCE/k`**.
 
-15% is sized as a **discrete visible event** (the Butterfingers/Leaky Pockets class, not the
-Clumsy Digger class): P(at least one proc in a 5-mob fight) = **55.6%**, the lowest value that
-clears a coin flip per ordinary fight. Above Butterfingers' 10% on purpose — a curse is tuned
-so it does not dominate, a blessing so it does not disappear. The rate is asserted by driving
-200,000 uniform samples through the real predicate, not by restating the constant.
+| | 15% (shipped first) | **30% (now)** |
+|---|---|---|
+| single-pool mob, `k=1` (zombie: rotten flesh) | +15% | **+30%** — the ceiling |
+| two-pool mob, `k=2` (skeleton: bones, arrows) | +7.5% | **+15%** — the floor |
+| Looting III on a 0-2 common pool (mean 1.0 → 2.5) | +150% | +150% |
+
+So the ceiling is still **a fifth of an enchantment the player could just have**, which is the
+bar the whole farm-safety judgement rests on. It **cannot introduce a resource the mob does not
+already drop**, so no farm becomes a source of something new, and it grants **no experience** —
+the one reward an AFK farm converts most efficiently.
+
+**The rate doubled and the shape did not, and that is the whole reason the judgement survived.**
+All three protections are properties of the shape. Dropping the *whole* second roll instead of
+one stack of it is the change that would have put 30% past the Looting III bar — it multiplies
+`1 + CHANCE/k` into `1 + CHANCE`, and at k=2 that is the difference between +15% and +30% on a
+mob where the effect was supposed to be at its weakest.
+
+30% is sized as a **discrete visible event** (the Butterfingers/Leaky Pockets class, not the
+Clumsy Digger class):
+
+| chance | mean gap | P(≥1 proc in a 5-mob fight) |
+|---|---|---|
+| 10% | 10 mobs | 41.0% |
+| 15% | 6.7 mobs | 55.6% |
+| **30%** | **3.3 mobs** | **83.2%** |
+| 50% | 2 mobs | 96.9% |
+
+15% cleared a coin flip per fight and was still too rare to *attribute*: at a mean gap of 6.7
+mobs more than one fight in three pays nothing, and a blessing the player cannot tell they are
+holding is the exact failure this effect was sized against. **30% is the value where the mean
+gap falls inside a single fight** (3.3 mobs), so the effect is normally observed *within* the
+fight rather than remembered across several. It stops short of 50%, where a bonus drop becomes
+the expected outcome of every second kill and reads as the mob's own loot table rather than as
+the run. The rate is asserted by driving 200,000 uniform samples through the real predicate,
+not by restating the constant.
 
 **`chooseBonusIndex` clamps a roll of exactly `1.0f`** to the last index. Reachable for a
 float sample, and it would be an `IndexOutOfBoundsException` on a live server rather than a

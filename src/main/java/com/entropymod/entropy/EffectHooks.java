@@ -34,9 +34,12 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.item.component.ItemContainerContents;
 import net.minecraft.world.item.context.BlockPlaceContext;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import com.entropymod.entropy.behavior.ReverseMidasBehavior;
+import com.entropymod.entropy.block.ReverseMidasBlocks;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityReference;
 import net.minecraft.world.entity.LivingEntity;
@@ -294,7 +297,77 @@ public final class EffectHooks {
 		if (sparesStoredContents(context.getItemInHand())) {
 			return state;
 		}
+		// Precedence, fixed and asserted by the harness: golden equivalent, then
+		// multi-block, then plain gold. See ReverseMidasBlocks for both tables.
+		Block golden = ReverseMidasBlocks.goldenEquivalent(state.getBlock());
+		if (golden != null) {
+			// The substitute computes its OWN placement state rather than
+			// inheriting the original's properties: a rail's SHAPE can be a curve
+			// that a powered rail has no value for, and letting the golden block
+			// answer means it connects, waterlogs and faces the way vanilla would
+			// have placed it. Null means it declined; a default state still places.
+			BlockState substitute = golden.getStateForPlacement(context);
+			return substitute != null ? substitute : golden.defaultBlockState();
+		}
+		if (ReverseMidasBlocks.placesTwoPositions(state.getBlock())) {
+			// The one deliberate exception to the BEFORE rule. Vanilla places the
+			// real door/bed/double plant, both cells, with its own orientation and
+			// hinge logic, and reverseMidasAfterPlacement turns both to gold on the
+			// way out of the same place() call.
+			return state;
+		}
 		return Blocks.GOLD_BLOCK.defaultBlockState();
+	}
+
+	/**
+	 * Turns both cells of a two-position placement to gold, on the way out of the
+	 * same {@code BlockItem.place} call that made them (Reverse Midas).
+	 *
+	 * <p><b>This is the AFTER half of the effect and it exists for exactly three
+	 * block families</b> -- doors, beds and double plants. Everything else is still
+	 * replaced before {@code setBlock}, because doing it afterwards means the real
+	 * block genuinely exists for an instant and the destruction is the part that can
+	 * go wrong. These three earn the exception because the second cell is written by
+	 * {@code setPlacedBy}, which {@code place} only reaches <i>after</i> the
+	 * {@code @ModifyArg} -- and once the state is gold, {@code setPlacedBy} is
+	 * dispatched on {@code Blocks.GOLD_BLOCK} and the second cell is never written.
+	 * Reproducing each family's facing, hinge and half computation here instead
+	 * would be re-implementing three pieces of vanilla to get the same answer.
+	 *
+	 * <p>Gated identically to {@link #reverseMidasPlacement}, and then gated again
+	 * on the world: it converts only if the block actually standing at the clicked
+	 * position is one of the three families. A placement that was already turned to
+	 * gold reads back as gold and returns here immediately.
+	 *
+	 * <p>{@code context} is the caller's own argument rather than the updated one
+	 * {@code place} works with internally, which is safe because
+	 * {@code updatePlacementContext} is overridden by exactly one vanilla item
+	 * ({@code ScaffoldingBlockItem}) and no member of these three families -- so the
+	 * clicked position is the same object's.
+	 */
+	public static void reverseMidasAfterPlacement(BlockPlaceContext context, InteractionResult result) {
+		if (result == null || !result.consumesAction()) {
+			return;
+		}
+		if (!(context.getLevel() instanceof ServerLevel level)) {
+			return;
+		}
+		Player player = context.getPlayer();
+		if (player == null) {
+			return;
+		}
+		AcquiredEffects acquired = acquired(player);
+		if (acquired == null || !acquired.contains(ReverseMidasBehavior.ID)) {
+			return;
+		}
+		BlockPos pos = context.getClickedPos();
+		BlockState placed = level.getBlockState(pos);
+		if (!ReverseMidasBlocks.placesTwoPositions(placed.getBlock())) {
+			return;
+		}
+		int cells = ReverseMidasBlocks.convertBothHalves(level, pos, placed);
+		EntropyMod.LOGGER.debug("Reverse Midas: {} at {} converted to gold in {} cell(s)",
+				placed.getBlock(), pos, cells);
 	}
 
 	/**

@@ -1,8 +1,10 @@
 package com.entropymod.harness;
 
+import net.minecraft.core.BlockPos;
 import com.entropymod.entropy.AcquiredEffects;
 import com.entropymod.entropy.EffectDefinition;
 import com.entropymod.entropy.EffectHooks;
+import com.entropymod.entropy.block.ReverseMidasBlocks;
 import com.entropymod.entropy.EffectRegistry;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.entropy.behavior.DoubleJumpBehavior;
@@ -6682,6 +6684,193 @@ public final class HarnessMain {
 				"the replacement is a plain gold block default state -- no custom block, so it "
 						+ "mines, drops and stacks exactly like any gold block");
 
+		// --- PART 2: the golden vanilla equivalents ---
+		// The curated table. A pair is in it only when a gold block would DESTROY
+		// the item's function, which is what keeps it three rows rather than eight.
+		var goldPlate = net.minecraft.world.level.block.Blocks.LIGHT_WEIGHTED_PRESSURE_PLATE;
+		for (var plate : List.of(
+				net.minecraft.world.level.block.Blocks.STONE_PRESSURE_PLATE,
+				net.minecraft.world.level.block.Blocks.OAK_PRESSURE_PLATE,
+				net.minecraft.world.level.block.Blocks.POLISHED_BLACKSTONE_PRESSURE_PLATE,
+				net.minecraft.world.level.block.Blocks.HEAVY_WEIGHTED_PRESSURE_PLATE)) {
+			check(ReverseMidasBlocks.goldenEquivalent(plate) == goldPlate,
+					plate.getName().getString() + " places a LIGHT WEIGHTED (gold) pressure plate, "
+							+ "not a gold block -- it is still a pressure plate, which a full block "
+							+ "cannot be");
+		}
+		var poweredRail = net.minecraft.world.level.block.Blocks.POWERED_RAIL;
+		for (var rail : List.of(
+				net.minecraft.world.level.block.Blocks.RAIL,
+				net.minecraft.world.level.block.Blocks.DETECTOR_RAIL,
+				net.minecraft.world.level.block.Blocks.ACTIVATOR_RAIL,
+				poweredRail)) {
+			check(ReverseMidasBlocks.goldenEquivalent(rail) == poweredRail,
+					rail.getName().getString() + " places a POWERED RAIL -- the whole rail family, "
+							+ "because the alternative for a detector rail is a solid block in the "
+							+ "middle of the track, which preserves strictly less");
+		}
+		check(ReverseMidasBlocks.goldenEquivalent(
+						net.minecraft.world.level.block.Blocks.DANDELION)
+						== net.minecraft.world.level.block.Blocks.GOLDEN_DANDELION,
+				"a DANDELION places a GOLDEN_DANDELION -- the row that had to be found rather than "
+						+ "assumed: this block is new in 26.1 and would not have been in a remembered "
+						+ "'pressure plate and rail' list");
+		check(ReverseMidasBlocks.goldenEquivalent(
+						net.minecraft.world.level.block.Blocks.POPPY) == null,
+				"...but a POPPY does NOT -- the pair is the one exact species match, and mapping "
+						+ "every flower onto this one would be inventing an equivalence");
+		for (var solid : List.of(
+				net.minecraft.world.level.block.Blocks.GOLD_ORE,
+				net.minecraft.world.level.block.Blocks.GILDED_BLACKSTONE,
+				net.minecraft.world.level.block.Blocks.RAW_GOLD_BLOCK,
+				net.minecraft.world.level.block.Blocks.STONE,
+				net.minecraft.world.level.block.Blocks.CHEST,
+				net.minecraft.world.level.block.Blocks.TORCH)) {
+			check(ReverseMidasBlocks.goldenEquivalent(solid) == null,
+					solid.getName().getString() + " has no entry. The gold-material solids "
+							+ "(gold/deepslate/nether ore, gilded blackstone, raw gold block) are "
+							+ "deliberately excluded: a gold block is already a full solid block, so "
+							+ "substituting one changes the texture and nothing else");
+		}
+		check(Checks.classReferences(EffectHooks.class, "getStateForPlacement"),
+				"the substitute computes its OWN placement state rather than inheriting the "
+						+ "original's properties -- a rail's SHAPE can be a curve a powered rail has "
+						+ "no value for, so copying it would place a broken or default-facing block");
+
+		// --- PART 1: the blocks whose placement writes a SECOND world position ---
+		BlockPos probe = new BlockPos(4, 70, -9);
+		for (var multi : List.of(
+				net.minecraft.world.level.block.Blocks.OAK_DOOR,
+				net.minecraft.world.level.block.Blocks.IRON_DOOR,
+				net.minecraft.world.level.block.Blocks.COPPER_DOOR,
+				net.minecraft.world.level.block.Blocks.RED_BED,
+				net.minecraft.world.level.block.Blocks.SUNFLOWER,
+				net.minecraft.world.level.block.Blocks.LILAC,
+				net.minecraft.world.level.block.Blocks.ROSE_BUSH,
+				net.minecraft.world.level.block.Blocks.PEONY,
+				net.minecraft.world.level.block.Blocks.TALL_GRASS,
+				net.minecraft.world.level.block.Blocks.LARGE_FERN,
+				net.minecraft.world.level.block.Blocks.TALL_SEAGRASS,
+				net.minecraft.world.level.block.Blocks.SMALL_DRIPLEAF)) {
+			check(ReverseMidasBlocks.placesTwoPositions(multi),
+					multi.getName().getString() + " is a two-position placement, so it is handed to "
+							+ "vanilla whole and converted AFTER -- the @ModifyArg alone would have "
+							+ "produced ONE gold block, because setPlacedBy (offset 171) is dispatched "
+							+ "on the block that reached the world and gold does not override it");
+			check(ReverseMidasBlocks.cellsToConvert(probe, multi.defaultBlockState()).size() == 2,
+					"...and BOTH of its cells are converted, not just the clicked one");
+		}
+		for (var single : List.of(
+				net.minecraft.world.level.block.Blocks.STONE,
+				net.minecraft.world.level.block.Blocks.CHEST,
+				net.minecraft.world.level.block.Blocks.TORCH,
+				net.minecraft.world.level.block.Blocks.OAK_SIGN,
+				net.minecraft.world.level.block.Blocks.DANDELION,
+				net.minecraft.world.level.block.Blocks.STONE_PRESSURE_PLATE,
+				net.minecraft.world.level.block.Blocks.RAIL)) {
+			check(!ReverseMidasBlocks.placesTwoPositions(single),
+					single.getName().getString() + " is NOT, so it keeps the BEFORE path where the "
+							+ "original block entity is never created");
+		}
+		check(!ReverseMidasBlocks.placesTwoPositions(
+						net.minecraft.world.level.block.Blocks.PITCHER_CROP),
+				"PITCHER_CROP extends DoublePlantBlock and is still excluded -- it OVERRIDES "
+						+ "setPlacedBy with a bare return (javap: offset 0), so a pitcher pod plants "
+						+ "one cell and grows the second later. Inheritance said multi-block here and "
+						+ "the bytecode said otherwise");
+		check(!ReverseMidasBlocks.placesTwoPositions(
+						net.minecraft.world.level.block.Blocks.PALE_MOSS_CARPET),
+				"PALE_MOSS_CARPET is the other near miss and is excluded too: its setPlacedBy may "
+						+ "write pos.above(), but only a decorative topper, only when non-air, and "
+						+ "with a RANDOM per-side chance -- including it would make one carpet place "
+						+ "one or two gold blocks depending on a die roll");
+
+		// The partner cell is read from the state VANILLA wrote, never recomputed.
+		var doorLower = net.minecraft.world.level.block.Blocks.OAK_DOOR.defaultBlockState();
+		check(ReverseMidasBlocks.partnerPos(probe, doorLower).equals(probe.above()),
+				"a door's lower half names the cell ABOVE it");
+		var doorUpper = doorLower.setValue(
+				net.minecraft.world.level.block.state.properties.BlockStateProperties.DOUBLE_BLOCK_HALF,
+				net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER);
+		check(ReverseMidasBlocks.partnerPos(probe, doorUpper).equals(probe.below()),
+				"...and an upper half names the cell below, read from the shared "
+						+ "BlockStateProperties.DOUBLE_BLOCK_HALF that DoorBlock.HALF and "
+						+ "DoublePlantBlock.HALF both alias");
+		check(ReverseMidasBlocks.partnerPos(
+						probe, net.minecraft.world.level.block.Blocks.SUNFLOWER.defaultBlockState())
+						.equals(probe.above()),
+				"a double plant's lower half does the same");
+		var bedFoot = net.minecraft.world.level.block.Blocks.RED_BED.defaultBlockState()
+				.setValue(net.minecraft.world.level.block.HorizontalDirectionalBlock.FACING,
+						net.minecraft.core.Direction.EAST);
+		check(ReverseMidasBlocks.partnerPos(probe, bedFoot).equals(probe.east()),
+				"a bed's foot names the cell its FACING points at -- via vanilla's own "
+						+ "BedBlock.getConnectedDirection, so facing and orientation are vanilla's "
+						+ "answers rather than ours");
+		check(ReverseMidasBlocks.partnerPos(
+						probe, net.minecraft.world.level.block.Blocks.STONE.defaultBlockState()) == null,
+				"...and an ordinary block names no partner at all");
+
+		// --- precedence, and that the two tables cannot contend ---
+		int goldenCount = 0;
+		int multiCount = 0;
+		boolean disjoint = true;
+		for (var block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
+			boolean hasGolden = ReverseMidasBlocks.goldenEquivalent(block) != null;
+			boolean isMulti = ReverseMidasBlocks.placesTwoPositions(block);
+			disjoint &= !(hasGolden && isMulti);
+			if (hasGolden) {
+				goldenCount++;
+			}
+			if (isMulti) {
+				multiCount++;
+			}
+		}
+		check(disjoint && goldenCount > 0 && multiCount > 0,
+				"swept the whole block registry: " + goldenCount + " blocks have a golden equivalent "
+						+ "and " + multiCount + " place two cells, and the two sets are DISJOINT -- so "
+						+ "the fixed precedence (carve-out, golden, two-cell, gold block) cannot change "
+						+ "any outcome today, and is fixed so a future addition to either table cannot "
+						+ "make one depend on which check was written first");
+		check(Checks.hasMethod(ReverseMidasBlocks.class, "goldenEquivalent")
+						&& Checks.hasMethod(ReverseMidasBlocks.class, "placesTwoPositions")
+						&& Checks.classReferences(EffectHooks.class, "goldenEquivalent")
+						&& Checks.classReferences(EffectHooks.class, "placesTwoPositions"),
+				"...and both tables are consulted from reverseMidasPlacement, so the precedence "
+						+ "lives in one readable method rather than being spread across the mixin");
+		check(Checks.classReferences(
+						com.entropymod.mixin.BlockItemPlacementMixin.class, "reverseMidasAfterPlacement")
+						&& !Checks.classReferences(
+								com.entropymod.mixin.BlockItemPlacementMixin.class, "setBlock"),
+				"the AFTER half is a second one-line injection at place()'s RETURN, and the mixin "
+						+ "still writes no block itself -- every decision stays in EffectHooks");
+		check(Checks.classReferences(EffectHooks.class, "consumesAction"),
+				"...and it is gated on the return value, so place()'s four FAIL paths convert "
+						+ "nothing");
+
+		// A version bump that adds a new second-position writer must not pass silently.
+		java.util.TreeSet<String> declarers = new java.util.TreeSet<>();
+		for (var block : net.minecraft.core.registries.BuiltInRegistries.BLOCK) {
+			for (Class<?> c = block.getClass(); c != null; c = c.getSuperclass()) {
+				for (var m : c.getDeclaredMethods()) {
+					if (m.getName().equals("setPlacedBy")) {
+						declarers.add(c.getSimpleName());
+					}
+				}
+			}
+		}
+		java.util.TreeSet<String> expectedDeclarers = new java.util.TreeSet<>(List.of(
+				"BedBlock", "Block", "CommandBlock", "CrafterBlock", "DiodeBlock", "DoorBlock",
+				"DoublePlantBlock", "DriedGhastBlock", "JukeboxBlock", "MossyCarpetBlock",
+				"PistonBaseBlock", "PitcherCropBlock", "SmallDripleafBlock", "StructureBlock",
+				"TripWireHookBlock", "WitherSkullBlock", "WitherWallSkullBlock"));
+		check(declarers.equals(expectedDeclarers),
+				"the set of block classes declaring setPlacedBy is exactly the "
+						+ expectedDeclarers.size() + " pinned ones (got " + declarers.size() + ": "
+						+ declarers + ") -- this is the check that fails on a version bump introducing "
+						+ "a NEW second-position writer, which would otherwise place one gold block "
+						+ "where two belong and look like nothing at all");
+
 		// ================= GRAVE ROBBER =================
 
 		// --- the radius IS vanilla's follow range, read from the real supplier ---
@@ -6725,7 +6914,8 @@ public final class HarnessMain {
 
 		// --- the proc rate, driven across its real boundary and at scale ---
 		float chance = (float) constant(GraveRobberBehavior.class, "CHANCE");
-		checkNear(chance, 0.15f, 1e-6, "proc chance is 15%");
+		checkNear(chance, 0.30f, 1e-6, "proc chance is 30% -- doubled from the 15% that shipped "
+				+ "first, which read as too rare to attribute at a mean gap of 6.7 mobs");
 		check(!GraveRobberBehavior.rollsBonus(chance),
 				"the roll is strictly less-than, so a sample of exactly CHANCE does NOT proc");
 		check(GraveRobberBehavior.rollsBonus(0.0f) && !GraveRobberBehavior.rollsBonus(0.999f),
@@ -6745,10 +6935,41 @@ public final class HarnessMain {
 						+ "just a number stored next to the code");
 		// What that rate means to a player, asserted so a retune has to face it.
 		double atLeastOneInFive = 1.0 - Math.pow(1.0 - chance, 5);
-		check(atLeastOneInFive > 0.5,
-				"P(at least one proc in a 5-mob fight) = " + String.format("%.1f%%", atLeastOneInFive * 100)
-						+ " -- clears a coin flip per ordinary fight, which is the bar for a GOOD "
-						+ "effect the player is meant to notice they picked");
+		checkNear(atLeastOneInFive, 0.8319, 1e-3,
+				"P(at least one proc in a 5-mob fight) = "
+						+ String.format("%.1f%%", atLeastOneInFive * 100) + ", up from 55.6% at 15%");
+		double meanGap = 1.0 / chance;
+		check(meanGap < 5.0,
+				"...and the mean gap is " + String.format("%.1f", meanGap) + " mobs, which is SHORTER "
+						+ "than an ordinary fight -- that is the bar the doubling was aimed at: the "
+						+ "effect is normally observed within one fight rather than remembered across "
+						+ "several");
+		check(chance < 0.5,
+				"...but still under 50%, which would make a bonus drop the expected outcome of every "
+						+ "second kill and read as the mob's own loot table rather than as the run");
+		// The farm-balance claim, recomputed at the new rate rather than restated.
+		// One uniformly-chosen stack of a second identical roll is 1/k of a roll for
+		// a mob whose death roll produces k stacks, so the yield multiplier is
+		// 1 + CHANCE/k. Looting III takes a 0-2 common pool to 0-5: mean 1.0 -> 2.5.
+		double singlePoolBump = chance / 1.0;
+		double twoPoolBump = chance / 2.0;
+		double lootingIiiBump = (2.5 - 1.0) / 1.0;
+		checkNear(singlePoolBump, 0.30, 1e-6,
+				"a single-pool mob (a zombie is rotten flesh and little else) yields +"
+						+ String.format("%.0f%%", singlePoolBump * 100) + " -- the CEILING of the effect");
+		checkNear(twoPoolBump, 0.15, 1e-6,
+				"...a two-pool mob (a skeleton: bones and arrows) yields +"
+						+ String.format("%.0f%%", twoPoolBump * 100) + " -- the floor");
+		check(singlePoolBump < lootingIiiBump,
+				"...and the ceiling is still a fifth of Looting III's +"
+						+ String.format("%.0f%%", lootingIiiBump * 100) + ", which is the bar the "
+						+ "farm-safety judgement rests on. Doubling the RATE did not move that "
+						+ "judgement; doubling the SHAPE (dropping the whole second roll instead of "
+						+ "one stack of it) would have");
+		check(Checks.classReferences(
+						com.entropymod.entropy.loot.GraveRobberDrops.class, "chooseBonusIndex"),
+				"...and the shape is unchanged: ONE stack is still chosen from the second roll, "
+						+ "which is what keeps 1 + CHANCE/k linear in the rate");
 
 		// --- choosing ONE stack, and the empty roll ---
 		check(GraveRobberBehavior.chooseBonusIndex(0, 0.5f) == -1,

@@ -77,10 +77,16 @@ import com.entropymod.entropy.HookEffectBehavior;
  *
  * <ul>
  *   <li><b>It is a percentage of what the mob already gives.</b> One stack from a
- *       second roll at {@value #CHANCE} works out around a <b>+10-15% yield</b>.
- *       That is well under a Looting III sword and is inside ordinary session
- *       variance -- it cannot make a cheap mob worth farming, only a mob already
- *       worth farming slightly better.</li>
+ *       second roll at {@value #CHANCE} works out at <b>+15% to +30% yield</b>.
+ *       Derived rather than asserted: if a mob's death roll produces {@code k}
+ *       stacks, one uniformly-chosen stack of an identical second roll is
+ *       {@code 1/k} of a roll in expectation, so the multiplier is
+ *       {@code 1 + CHANCE/k}. {@code k = 1} for a single-pool mob (a zombie is
+ *       rotten flesh and little else) gives +30%; {@code k = 2} for a skeleton
+ *       (bones and arrows) gives +15%. A Looting III sword takes a 0-2 common pool
+ *       to 0-5 -- mean 1.0 to 2.5, <b>+150%</b> -- so the ceiling here is a fifth
+ *       of an enchantment the player could just have. It cannot make a cheap mob
+ *       worth farming, only a mob already worth farming somewhat better.</li>
  *   <li><b>It cannot introduce a new resource.</b> Nothing drops that the table
  *       does not already contain, so no farm becomes a source of something it was
  *       not already a source of.</li>
@@ -93,6 +99,15 @@ import com.entropymod.entropy.HookEffectBehavior;
  * felt bonus rather than a farming multiplier. If it reads as too strong in play,
  * {@link #CHANCE} is the single lever.
  *
+ * <p><b>The doubling from 15% to 30% did not change any of that.</b> All three
+ * protections are properties of the reward's shape, not of its rate: it is still a
+ * fraction of the mob's own table, it still cannot introduce a resource the mob
+ * does not already drop, and it still grants no experience. The rate moves the
+ * yield bump from +7.5-15% to +15-30%, which stays under the Looting III bar that
+ * the judgement above rests on. <b>The shape was deliberately left alone</b> --
+ * dropping the whole second roll instead of one stack of it would have doubled
+ * every proc and put a 30% rate well past that bar.
+ *
  * <h2>6. {@value #CHANCE} is sized for a discrete, visible event</h2>
  *
  * <p>Same class of decision as Butterfingers Extreme (10%) and Leaky Pockets (7%),
@@ -104,14 +119,25 @@ import com.entropymod.entropy.HookEffectBehavior;
  *   <tr><th>chance</th><th>mean gap</th><th>in a 5-mob fight</th></tr>
  *   <tr><td>5%</td><td>20 mobs</td><td>22.6%</td></tr>
  *   <tr><td>10%</td><td>10 mobs</td><td>41.0%</td></tr>
- *   <tr><td><b>15%</b></td><td><b>6.7 mobs</b></td><td><b>55.6%</b></td></tr>
+ *   <tr><td>15% <i>(shipped first)</i></td><td>6.7 mobs</td><td>55.6%</td></tr>
  *   <tr><td>25%</td><td>4 mobs</td><td>76.3%</td></tr>
+ *   <tr><td><b>30%</b></td><td><b>3.3 mobs</b></td><td><b>83.2%</b></td></tr>
+ *   <tr><td>50%</td><td>2 mobs</td><td>96.9%</td></tr>
  * </table>
  *
- * <p>15% is the lowest value that clears a coin flip per ordinary fight, which is
- * the bar for a GOOD effect the player is supposed to notice they picked. It is
- * above Butterfingers' 10% on purpose -- a curse is tuned so it does not dominate,
- * a blessing so it does not disappear.
+ * <p>15% shipped first and was the lowest value that clears a coin flip per
+ * ordinary fight. In play it read as too rare to attribute: at a mean gap of 6.7
+ * mobs, more than one fight in three pays out nothing at all, and a blessing the
+ * player cannot tell they are holding is the failure mode this effect was sized
+ * against in the first place.
+ *
+ * <p><b>30% is the doubling, and it is the value where the mean gap falls inside a
+ * single fight.</b> 3.3 mobs is shorter than an ordinary encounter, so the effect
+ * is normally observed <i>within</i> the fight rather than remembered across
+ * several; {@code 1 - 0.7^5 = 83.2%} of five-mob fights pay out at least once,
+ * against 55.6% before. It stops short of 50%, which would make a bonus drop the
+ * expected outcome of every second kill and read as the mob's own loot table
+ * rather than as something the run granted.
  *
  * <p>apply()/remove() are empty by design -- see {@link HookEffectBehavior}.
  */
@@ -131,7 +157,7 @@ public final class GraveRobberBehavior extends HookEffectBehavior {
 	public static final double RADIUS_SQ = RADIUS * RADIUS;
 
 	/** Chance per qualifying death that a bonus drop is rolled. */
-	public static final float CHANCE = 0.15f;
+	public static final float CHANCE = 0.30f;
 
 	/**
 	 * Whether a mob dying this far away (squared) counts as "near".
