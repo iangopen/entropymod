@@ -10,6 +10,11 @@ import com.entropymod.entropy.behavior.ClumsyDiggerBehavior;
 import com.entropymod.entropy.behavior.CrouchInvincibilityBehavior;
 import com.entropymod.entropy.behavior.EarthquakeBehavior;
 import com.entropymod.entropy.behavior.FlamboyantBehavior;
+import com.entropymod.entropy.behavior.GluttonBehavior;
+import com.entropymod.entropy.behavior.LethalHookBehavior;
+import com.entropymod.entropy.behavior.LooseFootingBehavior;
+import com.entropymod.entropy.behavior.NightmaresBehavior;
+import com.entropymod.entropy.behavior.SlickBehavior;
 import com.entropymod.entropy.quake.EarthquakeService;
 import com.entropymod.entropy.behavior.SlashedPocketsBehavior;
 import com.entropymod.entropy.behavior.GreenThumbBehavior;
@@ -710,6 +715,101 @@ public final class EffectHooks {
 			return null;
 		}
 		return EntropyManager.get(server).acquired();
+	}
+
+	// ------------------------------------------------------------------
+	// The Slick / Loose Footing / Lethal Hook / Nightmares / Glutton batch.
+	// ------------------------------------------------------------------
+
+	/**
+	 * True if every block under this player should report ice's friction (Slick).
+	 *
+	 * <p>Read by {@code LivingEntityFrictionMixin}. The on-ground gate and the
+	 * constant itself live in {@link SlickBehavior#frictionFor}, so this answers
+	 * only "does this player have the effect" -- the same division of labour
+	 * {@link #ignoresProjectileKnockback} uses.
+	 */
+	public static boolean slidesOnEveryBlock(Player player) {
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null && acquired.contains(SlickBehavior.ID);
+	}
+
+	/**
+	 * True if sneaking should stop preventing this player walking off a ledge
+	 * (Loose Footing). Read by {@code PlayerEdgeSafetyMixin}.
+	 */
+	public static boolean ignoresEdgeSafety(Player player) {
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null && acquired.contains(LooseFootingBehavior.ID);
+	}
+
+	/**
+	 * True if this player's melee knockback should be reversed into a pull
+	 * (Lethal Hook).
+	 *
+	 * <p>Read by both knockback sites -- {@code LivingEntityKnockbackMixin}, which
+	 * Iron Will already owns, and {@code PlayerExtraKnockbackMixin}. <b>The
+	 * projectile exclusion is here rather than in the callers</b>, so the two
+	 * sites cannot drift into disagreeing about what counts as melee: the base hit
+	 * and the sprint bonus must reverse together or a sprinting attack pulls with
+	 * one call and shoves with the other.
+	 *
+	 * @param attacker whoever the {@code DamageSource} names, which is very often
+	 *                 not a player and is frequently null
+	 */
+	public static boolean reversesMeleeKnockback(Entity attacker, DamageSource source) {
+		if (source == null || source.is(DamageTypeTags.IS_PROJECTILE)) {
+			return false;
+		}
+		if (!(attacker instanceof Player player)) {
+			return false;
+		}
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null && acquired.contains(LethalHookBehavior.ID);
+	}
+
+	/**
+	 * The same question at a call site that has no {@code DamageSource} and needs
+	 * none: {@code Player.causeExtraKnockback}, which vanilla reaches only from
+	 * {@code Player.attack} and which is therefore melee by construction.
+	 *
+	 * <p>Kept as a separate overload rather than letting the other one accept a
+	 * null source, so that "no source given" cannot silently become "not a
+	 * projectile" at some future site where that is the wrong answer.
+	 */
+	public static boolean reversesMeleeKnockback(Player player) {
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null && acquired.contains(LethalHookBehavior.ID);
+	}
+
+	/**
+	 * True if a bed this player is using should explode (Nightmares).
+	 *
+	 * <p>Read by {@code BedExplosionMixin}, which ORs it with vanilla's own
+	 * {@code BedRule.explodes()} -- so this only ever adds the outcome and the
+	 * Nether keeps behaving exactly as it does for everyone else.
+	 */
+	public static boolean bedsExplode(Player player) {
+		AcquiredEffects acquired = acquired(player);
+		return acquired != null && acquired.contains(NightmaresBehavior.ID);
+	}
+
+	/**
+	 * Scales hunger and saturation restored by any source (Glutton).
+	 *
+	 * <p>Read by {@code FoodDataRestoreMixin} on the private
+	 * {@code FoodData.add(int, float)} -- the one funnel all three of vanilla's
+	 * restoration sources reach. See {@link GluttonBehavior} for the enumeration
+	 * and for why the nutrition side rounds.
+	 */
+	public static float foodRestoreMultiplier(Player player) {
+		AcquiredEffects acquired = acquired(player);
+		if (acquired == null) {
+			return 1.0f;
+		}
+		return acquired.contains(GluttonBehavior.ID)
+				? GluttonBehavior.MULTIPLIER
+				: 1.0f;
 	}
 
 	/**

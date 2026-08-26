@@ -38,6 +38,24 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  *       This mixin could not affect it even if the gate were wrong.</li>
  * </ul>
  *
+ * <h2>TWO effects share this one handler, deliberately</h2>
+ *
+ * <p>Lethal Hook needs the same call site from the opposite direction -- the player
+ * as <em>attacker</em> rather than victim -- and <b>a second {@code @Redirect} on
+ * one instruction is an apply-time conflict</b>, the trap Slippery Grip's
+ * sprint-jump pair hit. So it lives in this handler rather than in a mixin of its
+ * own. That is not a compromise: both decisions are made from the same
+ * {@code DamageSource}, so keeping them in one place is what stops them
+ * contradicting each other.
+ *
+ * <p>The two cannot collide. Iron Will's branch requires the source to be a
+ * projectile; Lethal Hook's requires it not to be. A run holding both is therefore
+ * ordinary -- arrows do not move the holder, and their own melee pulls -- and the
+ * order of the checks changes nothing. Lethal Hook's other half, the sprint and
+ * Knockback-enchantment bonus, is a different instruction in a different method and
+ * gets its own {@code PlayerExtraKnockbackMixin}; both must flip together or a
+ * sprinting attack pulls with one call and shoves with the other.
+ *
  * <p><b>Players without the effect, and every non-player entity, are unaffected.</b>
  * Both the {@code instanceof Player} check and the acquired-set lookup must pass
  * before anything is skipped; every other path calls the original knockback with
@@ -50,11 +68,19 @@ public abstract class LivingEntityKnockbackMixin {
 	@Redirect(
 			method = "hurtServer",
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/LivingEntity;knockback(DDD)V"))
-	private void entropymod$skipProjectileKnockback(LivingEntity target, double strength, double x, double z,
-													ServerLevel level, DamageSource source, float amount) {
+	private void entropymod$knockback(LivingEntity target, double strength, double x, double z,
+									  ServerLevel level, DamageSource source, float amount) {
+		// Iron Will: the VICTIM is a player who ignores projectile shove.
 		if (target instanceof Player player
 				&& source.is(DamageTypeTags.IS_PROJECTILE)
 				&& EffectHooks.ignoresProjectileKnockback(player)) {
+			return;
+		}
+		// Lethal Hook: the ATTACKER is a player whose melee drags things in.
+		// Negating the direction inverts the push without touching the strength,
+		// so KNOCKBACK_RESISTANCE still applies and the vertical pop survives.
+		if (EffectHooks.reversesMeleeKnockback(source.getEntity(), source)) {
+			target.knockback(strength, -x, -z);
 			return;
 		}
 		target.knockback(strength, x, z);

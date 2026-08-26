@@ -95,6 +95,12 @@ public final class EffectBehaviors {
 		register(BeastWrathBehavior.ID, new BeastWrathBehavior());
 		register(ReverseMidasBehavior.ID, new ReverseMidasBehavior());
 		register(GraveRobberBehavior.ID, new GraveRobberBehavior());
+		register(SlickBehavior.ID, new SlickBehavior());
+		register(LooseFootingBehavior.ID, new LooseFootingBehavior());
+		register(LethalHookBehavior.ID, new LethalHookBehavior());
+		register(HumanMachinegunBehavior.ID, new HumanMachinegunBehavior());
+		register(NightmaresBehavior.ID, new NightmaresBehavior());
+		register(GluttonBehavior.ID, new GluttonBehavior());
 
 		// TODO: Tiers 2-4 + odd/signature effects, same one-line-per-effect pattern.
 	}

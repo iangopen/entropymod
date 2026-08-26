@@ -369,6 +369,15 @@ is a bare `return`) get a scoped AFTER exception. Separately, the gold-material 
 preserve a *function* a gold block would destroy are three, not two: pressure plates, rails,
 and **`GOLDEN_DANDELION`**, which only exists in this version. See `entropy-effects` 1ax-1ay.
 
+**1az-1bb. `ADD_MULTIPLIED_BASE`'s "base" INCLUDES the `ADD_VALUE` pass — this file's own
+description of it was wrong twice.** `calculateValue` is `e += d * amount` where `d` is base
+*plus every `ADD_VALUE` modifier*, so a weapon is already folded in and **for a single modifier
+BASE and TOTAL are numerically identical**. The real difference is stacking (additive vs
+product), which is the `GRAVITY` argument on a new attribute. Separately: block friction is one
+local in `travelInAir` with **two** consumers — the acceleration *and* the decay — and changing
+only the first gives a sluggish player rather than a sliding one. See `entropy-effects` 1az-1bh,
+including why `@ModifyVariable` is the chainable shape when two sides share a target.
+
 **1an-1aq. FISH ARE NOT `Animal`, and an owner you have to RESOLVE is an owner you can
 lose.** `Cod -> AbstractFish -> WaterAnimal -> PathfinderMob` never passes through `Animal`,
 so a second attribute injection was needed; `Squid.travel(Vec3)` discards its argument

@@ -5377,3 +5377,276 @@ float sample, and it would be an `IndexOutOfBoundsException` on a live server ra
 wrong item. An empty second roll drops nothing and is **not re-rolled** — a mob that
 genuinely rolled nothing has nothing extra to give — and it logs, because "procced but rolled
 empty" and "never procced" are indistinguishable from the player's seat.
+
+---
+
+### Slick / Loose Footing / Lethal Hook / Human Machinegun / Nightmares / Glutton — findings 1az-1bh
+Registry is now **67 effects (32 GOOD / 35 BAD)**. All six are Tier 2 (25-50), permanent,
+`counterplay = true`, spread across five categories. **1bb is the correction most worth
+reading: it overturns a claim this file has made twice about `ADD_MULTIPLIED_BASE`.**
+
+#### 1az. BLOCK FRICTION IS ONE LOCAL WITH TWO CONSUMERS, AND CHANGING EITHER ALONE IS THE WRONG EFFECT
+Slick needed no imitation of ice. `BlockBehaviour` carries a `protected final float friction`
+(default **0.6**; ice, packed ice and frosted ice **0.98**; blue ice 0.989), and
+`LivingEntity.travelInAir(Vec3)` reads it exactly once, at offset 23, into **local slot 3**:
+
+```java
+float f = onGround()
+        ? level().getBlockState(getBlockPosBelowThatAffectsMyMovement()).getBlock().getFriction()
+        : 1.0f;                                                              // fstore_3
+```
+
+**That local is then read twice, and the two reads are the two halves of what "slippery"
+means:**
+
+| offset | use | what it controls |
+|---|---|---|
+| 31-36 | `f * 0.91f` → slot 4 | the per-tick horizontal **decay** |
+| 38-41 | `handleRelativeFrictionAndCalculateMovement(vec, f)` → `getFrictionInfluencedSpeed(f) = getSpeed() * (0.21600002f / f³)` | the **acceleration** |
+
+The tidy-looking target is `@ModifyArg` on the second call. **It is failure mode 2**: it changes
+how fast you get going and leaves how fast you stop at vanilla's 0.546 — a player who is merely
+sluggish, not one who slides. The local itself is the only point before both reads.
+
+**The numbers, and why the right one to quote is a distance:**
+
+| | friction | accel factor | decay | steady speed | coast distance | ticks to settle |
+|---|---|---|---|---|---|---|
+| ordinary ground | 0.60 | 1.0000 | 0.5460 | 4.4053 b/s | 0.485 blocks | 6 |
+| **ice** | **0.98** | **0.2295** | **0.8918** | 4.2421 b/s | **1.960 blocks** | **27** |
+
+**Top speed moves by under 4%** — the two changes very nearly cancel at steady state, which is
+exactly why ice makes you neither fast nor slow. **The felt magnitude is the 4.0x overshoot**, and
+it is produced by the decay term specifically. A first draft of the harness asserted "5 and 46
+ticks, a ninefold coast" from intuition and **failed against the real integration (6 and 27)**; the
+shipped assertion is derived, and it is stated as a distance because a distance is what the player
+watches themselves slide.
+
+**Gate on `onGround()`.** Vanilla substitutes a literal `1.0f` when airborne and *still* feeds it
+to the `f * 0.91f` decay, so overwriting it adds air drag the effect never claimed.
+
+#### 1ba. ⚑ WHEN TWO SIDES SHARE A TARGET, `@ModifyVariable` IS THE CHAINABLE SHAPE
+Slick needs a client half — **and it is load-bearing in a stronger sense than Slippery Grip's.**
+That effect's compensator is a `MOVEMENT_SPEED` modifier, so the server's answer reaches the client
+through `ClientboundUpdateAttributesPacket` anyway and its client mixin is a *prediction* fix.
+**Friction is not an attribute: there is nothing to sync and nothing to converge on**, so a
+server-only change would have the player slide on the server's copy and walk normally on their own
+screen, surfacing as rubber-banding.
+
+Two `@Redirect`s on one instruction is an apply-time conflict (the sprint-jump trap). The shape rule
+generalises past `@ModifyArg`: **`@ModifyVariable` handlers chain too**, each receiving the previous
+result. So both halves target slot 3, each scoped to the side it is the authority for (`ServerLevel`
+/ `LocalPlayer`), and each returns the value untouched otherwise — order-independent by
+construction. Both compute through one shared Minecraft-free `SlickBehavior.frictionFor`, so the two
+sides cannot drift.
+
+Loose Footing's pair is the *easy* version of the same situation, and the difference is worth
+naming: **both halves only ever cancel**, adding and removing nothing, so — unlike Slippery Grip's
+original pair — there is no ordering question at all and the scoping is discipline rather than a fix.
+
+#### 1bb. ⚑ CORRECTION: `ADD_MULTIPLIED_BASE`'S "BASE" INCLUDES THE `ADD_VALUE` PASS
+**This file has twice described `ADD_MULTIPLIED_BASE` as `value += base * amount` against the raw
+base** (under Slippery Grip, and under Glass Cannon Pact as "a flat +0.5 regardless of weapon").
+**That is wrong**, and the harness caught it: an assertion written from the belief predicted 5.25 and
+the real `AttributeInstance` returned 1.75.
+
+`AttributeInstance.calculateValue`, javap-verified:
+
+```java
+double d = getBaseValue();
+for (m : ADD_VALUE)            d += m.amount();      // the weapon lands HERE
+double e = d;
+for (m : ADD_MULTIPLIED_BASE)  e += d * m.amount();  // <- d, NOT getBaseValue()
+for (m : ADD_MULTIPLIED_TOTAL) e *= 1.0 + m.amount();
+```
+
+**The multiplicand is base + the `ADD_VALUE` pass — the weapon is already included.** Two
+consequences that matter beyond this batch:
+
+- **For a SINGLE modifier the two operations are numerically identical.** Both give
+  `d × (1 + amount)`. So "use TOTAL to make a relative claim true on a weapon" — the reasoning Human
+  Machinegun was first designed around — is not a real distinction, and any future effect choosing
+  between them on those grounds is choosing on a false premise.
+- **Glass Cannon Pact's +0.50 is +50% of the weapon-inclusive total, not +0.5 flat.** An iron sword
+  is 9.0 under it, not 6.5. Its own javadoc still says otherwise; left uncorrected only because that
+  effect was outside this session's scope, and flagged here so it is not re-derived from the wrong
+  statement.
+
+**The operations differ only on STACKING, and that is the real reason to choose:**
+`ADD_MULTIPLIED_BASE` accumulates **additively** against a fixed `d`; `ADD_MULTIPLIED_TOTAL` composes
+as a **product**. Two -0.75 modifiers give `d - 0.75d - 0.75d = -0.5d` → negative, clamped to **0.0
+damage**, against `d × 0.25 × 0.25 = 0.0625d`, which can never reach zero for any amount above -1.
+**This is Embrace the Moon's gravity argument on a different attribute** — and it is live rather than
+hypothetical, because `ATTACK_DAMAGE` floors at 0.0 (unlike `MAX_HEALTH`'s harmless 1.0) and
+anti-stacking is a *soft* rule dropped first.
+
+#### 1bc. Human Machinegun: the derived values, and read the PLAYER's base not the attribute's
+`ADD_MULTIPLIED_TOTAL` +0.90 speed and -0.75 damage. **Rule 1e applies to players too, in its
+"read the supplier" half**: `Attributes.ATTACK_DAMAGE.getDefaultValue()` is **2.0** while
+`DefaultAttributes.getSupplier(EntityType.PLAYER)` gives **1.0**, so reading the attribute doubles
+every damage figure in the table. (The *squared*-speed half of 1e remains mob-only — see 1z.)
+
+| | speed normal → cursed | cooldown | damage normal → cursed | DPS normal → cursed |
+|---|---|---|---|---|
+| bare hand | 4.00 → **7.60**/s | 5.00 → **2.63** ticks | 1.0 → **0.25** | 4.00 → **1.90** |
+| iron sword | 1.60 → **3.04**/s | 12.50 → **6.58** ticks | 6.0 → **1.50** | 9.60 → **4.56** |
+| netherite axe | 1.00 → **1.90**/s | 20.00 → **10.53** ticks | 10.0 → **2.50** | 10.00 → **4.75** |
+
+Every row is **exactly** x1.90 and x0.25, because a product is independent of the rest of the pool.
+**Net DPS is x0.475 uniformly, and that is what settles the phase**: registered **BAD** despite the
+attack-speed half reading as a buff. With Glass Cannon Pact an iron sword is
+`(1.0 + 5.0) × 1.5 × 0.25 = 2.25` — different passes, neither clobbering the other, since every
+modifier carries its own `Identifier`.
+
+#### 1bd. Loose Footing: the sneak-edge check is ONE pure function, and the regression is a list of ABSENCES
+Crouch-edge safety is not spread through the movement code. It is
+`Player.maybeBackOffFromEdge(Vec3, MoverType)`, called from `Entity.move`:
+
+```java
+if (!abilities.flying && vec.y <= 0.0
+    && (type == MoverType.SELF || type == MoverType.PLAYER)
+    && isStayingOnGroundSurface()          // == isShiftKeyDown(), offset 39
+    && isAboveGround(maxUpStep())) { ...walk x and z toward 0 in 0.05 steps... }
+return vec;                                // offsets 53-54
+```
+
+**It reads and writes nothing but the returned vector** — no field, no flag, no side effect — so
+returning the argument is byte-for-byte the `return vec` vanilla itself takes for a non-sneaking
+player. Nothing is partially applied and there is nothing to restore.
+
+**`Player` is the outermost override** (`Avatar`, `ServerPlayer`, `AbstractClientPlayer`,
+`LocalPlayer` declare none). Mapping note that cost a harness failure: it is
+**`net.minecraft.world.entity.Avatar`, not `...entity.player.Avatar`** — the wrong package yields a
+null `Class` and a check that fails for an unrelated reason.
+
+**Both sides are needed**, and the reason is easy to miss: vanilla's guard accepts
+`MoverType.PLAYER`, which is what `handleMovePlayer` moves a `ServerPlayer` with. A client-only
+cancel is clamped straight back on the next position update, so the player rubber-bands on the lip
+of every ledge instead of stepping off it.
+
+**The regression for "sneaking still works" is best written as absence.** Every other sneak behaviour
+lives on a different path — `refreshDimensions`/`Pose.CROUCHING` (hitbox and eye height),
+`getFrictionInfluencedSpeed` (the slowdown), `getVisibilityPercent` (the 0.8x mob discount),
+`isSecondaryUseActive` (place against a chest instead of opening it), each block's own handling
+(ladders, scaffolding, honey) — so the harness asserts the mixins **reference none of them**. An
+absence assertion is the only kind that catches "the fix reached further than intended". Note that
+"not falling off while building" is two things and only one is this method: the ledge stop is
+removed (that *is* the effect); placing against a container is `isSecondaryUseActive` and is intact.
+
+#### 1be. A landed player melee applies knockback at TWO sites, and reversing one INVERTS ON SPRINT
+Lethal Hook is Iron Will's problem mirrored, and the mirror is not symmetric:
+
+| site | what it is | hook |
+|---|---|---|
+| `LivingEntity.hurtServer` → `knockback(DDD)` | the base hit's shove | **Iron Will's existing `@Redirect`, extended** |
+| `Player.causeExtraKnockback` → `knockback(DDD)` | the sprint bonus (`+0.5f`) and the Knockback enchantment | `PlayerExtraKnockbackMixin` |
+
+**Reversing only the base site is worse than reversing neither**: a sprinting attack would pull with
+one call and shove with the other, so the effect looks right while walking and inverts the moment the
+player sprints. That is Slippery Grip's sprint-jump bypass in a new place, and the fix generalises the
+same way — **flip every branch that grants the same thing.**
+
+The base site could not take a second `@Redirect` (apply-time conflict), so **the two effects share
+one handler**. They cannot collide: Iron Will's branch requires `#is_projectile`, Lethal Hook's
+requires its absence, so a run holding both is ordinary and the check order is irrelevant.
+
+**The reversal is a sign flip on the DIRECTION, not the strength**, and that is load-bearing:
+
+```java
+strength *= 1.0 - getAttributeValue(KNOCKBACK_RESISTANCE);
+if (strength <= 0.0) return;                                   // <- negating strength dies HERE
+Vec3 push = new Vec3(x, 0.0, z).normalize().scale(strength);
+setDeltaMovement(delta.x/2 - push.x,
+                 onGround() ? Math.min(0.4, delta.y/2 + strength) : delta.y,
+                 delta.z/2 - push.z);
+```
+
+Negating `x`/`z` inverts the horizontal push into a pull while **`KNOCKBACK_RESISTANCE` still
+applies** and **the vertical pop survives** (it reads `strength`, not the direction) — which is what
+makes the pull read as a yank rather than a teleport. Negating `strength` would instead trip the
+early return and *cancel* knockback.
+
+`causeExtraKnockback` needs no damage-source gate: **vanilla reaches it only from `Player.attack`**,
+so melee-only holds there by construction. `Player` overrides `LivingEntity.causeExtraKnockback` and
+is the outermost override.
+
+**The buff (unspecified in the brief) is +1.5 `ENTITY_INTERACTION_RANGE`, 3.0 → 4.5.** Chosen because
+reach *composes* with the mechanic instead of sitting beside it — an effect whose content is "close
+the distance for you" wants the player able to open at a distance, and a hook that reaches further is
+the same object as a hook that pulls. It is registered `setSyncable(true)` (offset 283 of
+`Attributes`' clinit), so the client's own target raycast extends and there is no correction gap; and
+it is **not** `BLOCK_INTERACTION_RANGE`, so mining and placing reach are untouched.
+
+#### 1bf. Nightmares: the bed explosion is a DATA-DRIVEN rule, and flipping one boolean reuses all of it
+"Beds explode outside the Overworld" is not a dimension check in this version. It is
+`EnvironmentAttributes.BED_RULE`, and `BedBlock.useWithoutItem` consults it through **exactly one
+call**, `BedRule.explodes()` at offset 73, whose `ifeq` guards the whole branch: both halves
+`removeBlock`ed, `damageSources().badRespawnPointExplosion(centre)` (and therefore the death
+message), power **5.0**, fire `true`, `ExplosionInteraction.BLOCK`.
+
+**Redirecting that boolean is the entire effect — the mod makes no `Level.explode` call at all**,
+which is why this was the cheapest build in the batch and why it cannot drift from vanilla.
+
+- **Scoped per player**: the `Player` is parameter 4, and a redirect handler may capture the
+  enclosing parameters after its own.
+- **Server-only for free**: `useWithoutItem` opens with `if (level.isClientSide) return SUCCESS_SERVER`.
+- **ORed with the original, never replacing it**, so the Nether and End are unchanged for everyone and
+  a datapack's custom exploding dimension is honoured.
+- **`BedBlock` has no subclasses** — the sixteen colours are sixteen instances with a `DyeColor` field.
+- Setting spawn needs no separate block: vanilla's branch returns before `startSleepInBed`.
+
+Since every non-Overworld dimension already explodes, **"explodes in the Overworld for the holder"
+and "always explodes for the holder" are the same rule**, and the second cannot go stale when a
+dimension is added. `counterplay = true` on Flamboyant's precedent: the flag means an in-game answer
+exists, and here it is total — the trigger is one deliberate, unhurried click the player never has to
+make, on an object vanilla has already trained everyone to associate with an explosion.
+
+#### 1bg. Glutton: hook the PRIVATE funnel, and give `FoodData` the owner it lacks
+The eating side has what the exhaustion side did not: a single private funnel. Both public `eat`
+overloads are one-line delegations to **`FoodData.add(int, float)`**, and every restoration source in
+the jar reaches it:
+
+| caller | covers |
+|---|---|
+| `FoodProperties.onConsume(Level, LivingEntity, ItemStack, Consumable)` | **every food item** — food is a data component, so this is one hook for all of them, modded included |
+| `CakeBlock.eat(...)` → `eat(2, 0.1f)` | cake, which is a block and never an item on the way in |
+| `SaturationMobEffect.applyEffectTick` → `eat(amplifier + 1, 1.0f)` | the Saturation effect |
+
+**Hooking `add` rather than the three callers is what makes "all sources, uniformly" structural
+instead of a list that goes stale** — the same reasoning as Clumsy Digger's tag instead of an item
+list. The reduction also lands *before* vanilla's clamps, so `saturation <= foodLevel` still holds and
+nothing can be pushed out of range.
+
+**`FoodData` holds no owner** — the same gap that put `PlayerExhaustionMixin` on
+`Player.causeFoodExhaustion` — and here there is no caller high enough to substitute. So a `@Unique`
+field is added to `FoodData` behind a `FoodDataOwner` interface (ordinary Mixin duck-typing) and
+stamped at the **TAIL of `Player`'s one constructor**, `(Level, GameProfile)`. That is stronger than
+injecting into `getFoodData()`: it guarantees the reference exists before any `add` can run, and it
+re-stamps automatically on the brand-new `ServerPlayer` a death respawn builds. Not serialised —
+derived state, rebuilt, like the attribute effects. An unstamped `FoodData` reports null and the hook
+returns 1.0f, so the failure direction is vanilla behaviour rather than a crash.
+
+**Rounding: `Math.round`, no floor.** `foodLevel` is an `int` and `(int)(2 * 0.25f)` is 0, the trap
+`EffectHooks.scaleAmount` exists for on XP. Saturation is a float and is exact.
+
+| food | nutrition → cursed | saturation mod → cursed |
+|---|---|---|
+| cooked beef | 8 → **2** | 0.8 → 0.2 |
+| golden carrot | 6 → **2** | 1.2 → 0.3 |
+| bread | 5 → **1** | 0.6 → 0.15 |
+| cake slice / cookie | 2 → **1** | 0.1 → 0.025 |
+| dried kelp | 1 → **0** | 0.6 → 0.15 |
+
+**Flagged: a nutrition-1 food restores no hunger.** Dried kelp is the only vanilla item there. A floor
+of 1 was rejected because it would make a 2-point food a 50% reduction and a 20-point one a 75%
+reduction — exactly the non-uniformity the spec rules out. Its saturation still lands, so the item is
+not wholly inert.
+
+#### 1bh. The harness classpath is the MAIN source set, so a client half gets a LABELLED weaker check
+Recorded because this batch has two client mixins and the constraint bites every time. `src/client`
+is not on the harness classpath (the property that pushed the keybind snapshot to server-side
+persistence and leaves Double Jump's client driver unreachable), so `Checks.classReferences` cannot
+see those classes at all. The shipped checks read **the client mixin config and the client source
+text from disk**, and every such assertion is prefixed `[source-text]` so it is obvious which claims
+rest on bytecode and which do not. **Do not let an unlabelled source-text check pass for a bytecode
+one** — it can only catch a rename, never a wrong injection target.

@@ -4,6 +4,8 @@ import com.entropymod.entropy.KeybindSnapshot;
 import com.entropymod.entropy.MovementScramble;
 import com.entropymod.entropy.RunState;
 import com.entropymod.entropy.behavior.DoubleJumpBehavior;
+import com.entropymod.entropy.behavior.LooseFootingBehavior;
+import com.entropymod.entropy.behavior.SlickBehavior;
 import com.entropymod.entropy.behavior.OreSenseBehavior;
 import com.entropymod.entropy.behavior.RandomJumpBehavior;
 import com.entropymod.entropy.behavior.RandomizedControlsBehavior;
@@ -167,6 +169,33 @@ public final class ClientRunState {
 	 */
 	public static boolean hasOreSense() {
 		return EFFECTS.contains(OreSenseBehavior.ID);
+	}
+
+	/**
+	 * Slick, read by {@code ClientFrictionMixin}.
+	 *
+	 * <p>The client needs its own answer, and here that is stronger than the
+	 * Slippery Grip case: <b>friction is not an attribute</b>, so there is nothing
+	 * for {@code ClientboundUpdateAttributesPacket} to carry and no eventual
+	 * server sync to converge on. The client simulates its own movement, so
+	 * without this the two sides disagree about where the player ends up and the
+	 * result reads as rubber-banding rather than as ice.
+	 */
+	public static boolean hasSlick() {
+		return EFFECTS.contains(SlickBehavior.ID);
+	}
+
+	/**
+	 * Loose Footing, read by {@code ClientEdgeSafetyMixin}.
+	 *
+	 * <p>Edge-stop clamps the movement vector inside {@code Entity.move}, which for
+	 * a player runs on the client -- so this is the half that is actually felt. The
+	 * server half exists only because vanilla's guard also accepts
+	 * {@code MoverType.PLAYER}, which is how the server applies an incoming
+	 * position packet.
+	 */
+	public static boolean hasLooseFooting() {
+		return EFFECTS.contains(LooseFootingBehavior.ID);
 	}
 
 	public static boolean hasUpsideDownCamera() {

@@ -250,6 +250,42 @@ public final class EffectRegistry {
 				"Mobs dying near you sometimes give up one extra piece of their loot",
 				EffectCategory.COMBAT, EffectPhase.GOOD, 25, 50, true);
 
+		// Ice friction (0.98) forced onto every block underfoot. Counterplay is
+		// true: top speed is unchanged, so walking short bursts and letting the
+		// slide settle works -- it is acceleration and braking that are gone.
+		register("slick", "Slick",
+				"Every block you walk on is as slippery as ice",
+				EffectCategory.MOVEMENT, EffectPhase.BAD, 25, 50, true);
+
+		// Cancels Player.maybeBackOffFromEdge. Counterplay is true and total:
+		// stop at the edge yourself, or place a block before stepping out.
+		register("loose_footing", "Loose Footing",
+				"Sneaking no longer stops you walking off a ledge",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 25, 50, true);
+
+		register("lethal_hook", "Lethal Hook",
+				"Longer reach, and everything you hit in melee is dragged toward you "
+						+ "instead of knocked away",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 25, 50, true);
+
+		// BAD despite the attack-speed half reading as a buff: the two
+		// ADD_MULTIPLIED_TOTAL factors multiply out to x0.475 DPS for every weapon.
+		// See HumanMachinegunBehavior for the full derivation.
+		register("human_machinegun", "Human Machinegun",
+				"You swing 90% faster and hit for a quarter as much",
+				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
+
+		// Reuses vanilla's own BedRule.explodes() branch. Counterplay is true for
+		// the same reason Flamboyant's is despite killing outright: the trigger is
+		// one deliberate, unhurried click the player never has to make.
+		register("nightmares", "Nightmares",
+				"Beds explode when you try to sleep, wherever you are",
+				EffectCategory.UTILITY, EffectPhase.BAD, 25, 50, true);
+
+		register("glutton", "Glutton",
+				"Every food source restores 75% less hunger and saturation",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 25, 50, true);
+
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.
 	}

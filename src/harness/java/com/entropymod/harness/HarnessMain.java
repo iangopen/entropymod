@@ -163,6 +163,7 @@ public final class HarnessMain {
 		beastWrath();
 		beastWrathAquaticAndTameable();
 		reverseMidasAndGraveRobber();
+		SlickHookGluttonChecks.run();
 		System.exit(Checks.summary());
 	}
 
