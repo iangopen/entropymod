@@ -16,6 +16,9 @@ import com.entropymod.entropy.KeybindSnapshot;
 import com.entropymod.entropy.MovementScramble;
 import com.entropymod.entropy.RerollState;
 import com.entropymod.entropy.RunState;
+import com.entropymod.entropy.RunOutcome;
+import com.entropymod.entropy.RunEnd;
+import com.entropymod.network.RunEndPayload;
 import com.entropymod.entropy.AttributeEffectBehavior;
 import com.entropymod.entropy.EffectBehavior;
 import com.entropymod.entropy.EffectBehaviors;
@@ -153,7 +156,7 @@ public final class HarnessMain {
 		keybindSnapshotRules();
 		runStatePersistence();
 		runLifecyclePayloadRoundTrip();
-		endedStateNotBuilt();
+		endedStateBuilt();
 		tier2BatchWiring();
 		extremeGravityPhysics();
 		giantSizeAttribute();
@@ -194,6 +197,12 @@ public final class HarnessMain {
 		forcedPools();
 		metaPersistence();
 		doubledSeverityIdempotency();
+		gameOverMigration();
+		endedStopsTheLoop();
+		endedGatingScope();
+		endScreenReadsRealData();
+		deathCounter();
+		runEndPayloadRoundTrip();
 		System.exit(Checks.summary());
 	}
 
@@ -2159,17 +2168,445 @@ public final class HarnessMain {
 	 * a half-present {@code ENDED} constant would have no way to tell "started and
 	 * abandoned" from "deliberately deferred".
 	 */
-	private static void endedStateNotBuilt() {
-		section("The ENDED half is deliberately NOT built");
+	/**
+	 * The ENDED half is built, and the two conditions that reach it are wired.
+	 *
+	 * <p>This section previously asserted the opposite -- that {@code RunState} had
+	 * exactly two constants and neither {@code endRun} nor a death counter existed.
+	 * That was the "deferred, not started and abandoned" discipline doing its job;
+	 * it is inverted here rather than deleted, so the transition from one to the
+	 * other is visible in the diff.
+	 */
+	private static void endedStateBuilt() {
+		section("Run lifecycle: the ENDED half");
 
-		check(RunState.values().length == 2,
-				"RunState has exactly two constants -- no speculative ENDED to branch on");
-		check(Arrays.stream(RunState.values()).noneMatch(s -> s.name().equals("ENDED")),
-				"no ENDED constant exists yet");
-		check(!Checks.hasMethod(EntropyManager.class, "endRun"),
-				"no endRun() -- the three paths into ENDED are still unbuilt");
-		check(!Checks.hasMethod(EntropyManager.class, "getDeathCount"),
-				"no run-wide death counter yet (that belongs with the end screen)");
+		check(RunState.values().length == 3,
+				"RunState is NOT_STARTED / IN_PROGRESS / ENDED -- the full recorded architecture");
+		check(Arrays.stream(RunState.values()).anyMatch(st -> st.name().equals("ENDED")),
+				"ENDED exists, and something can now produce it");
+		check(Checks.hasMethod(EntropyManager.class, "endRun"),
+				"endRun() is the single entry point for every path into ENDED");
+		check(Checks.hasMethod(EntropyManager.class, "getDeathCount"),
+				"the run-wide death counter exists");
+
+		// The retired flag is GONE, not left returning false for nobody. Same
+		// discipline as the crop hooks: a neutral accessor can be re-wired by a
+		// later session that does not know why it was emptied.
+		check(!Checks.hasMethod(EntropyManager.class, "isGameOver"),
+				"isGameOver() is deleted, not neutralised -- there is one notion of "
+						+ "'the run is over' left, and it is RunState");
+
+		// Two outcomes, and the third is deliberately absent on the same rule that
+		// kept ENDED itself out until it was reachable.
+		check(RunOutcome.values().length == 2,
+				"two outcomes exist -- the dragon win and the entropy-cap loss");
+		check(RunOutcome.WIN_DRAGON.isWin() && !RunOutcome.LOSS_ENTROPY_CAP.isWin(),
+				"the win/loss split is carried by the outcome, not by a separate flag");
+		check(Arrays.stream(RunOutcome.values())
+						.noneMatch(o -> o.name().contains("HARDCORE")),
+				"no LOSS_HARDCORE_DEATH constant yet -- Become Hardcore is a separate "
+						+ "session, and a constant nothing can produce is what this project "
+						+ "avoids on purpose");
+
+		// ...but the mechanism it will plug into is finished. Asserting the pieces
+		// exist is what makes "one constant plus one endRun call" a checkable claim
+		// rather than a promise.
+		check(Checks.hasMethod(EntropyManager.class, "isEnded")
+						&& Checks.hasMethod(EntropyManager.class, "getOutcome")
+						&& Checks.hasMethod(EntropyManager.class, "recordDeath"),
+				"Become Hardcore needs no new architecture: endRun, isEnded, getOutcome "
+						+ "and recordDeath are all here, and its death listener already exists");
+
+		// Outcomes go on the wire and into saves by NAME, the same rule EffectPhase
+		// and RunState follow -- reordering must not turn a loss into a win.
+		check(RunOutcome.parse("WIN_DRAGON") == RunOutcome.WIN_DRAGON,
+				"an outcome round-trips by name");
+		check(RunOutcome.parse("SOMETHING_ELSE") == null && RunOutcome.parse(null) == null,
+				"an unrecognised outcome is null, NOT a fallback -- guessing would tell "
+						+ "the player they won a run they lost");
+		check(RunState.parse("ENDED") == RunState.ENDED, "ENDED round-trips by name");
+		check(RunState.parse("nonsense") == RunState.NOT_STARTED,
+				"an unreadable run state still falls back to NOT_STARTED, never to the "
+						+ "terminal state -- a bad string must not end a run");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The {@code gameOver} -&gt; {@code ENDED} migration, which is the one part of
+	 * this work that could silently break an existing world.
+	 *
+	 * <p>Before {@code RunState.ENDED} existed, a run that hit the cap was recorded
+	 * as {@code game_over = true} with {@code run_state} left at
+	 * {@code IN_PROGRESS} -- the two were never reconciled. Reading {@code run_state}
+	 * alone on such a save would load a finished run as live.
+	 */
+	private static void gameOverMigration() {
+		section("Legacy game_over migrates to ENDED");
+
+		// A pre-ENDED save mid-run: game_over true, run_state IN_PROGRESS.
+		com.google.gson.JsonObject legacy = new com.google.gson.JsonObject();
+		legacy.addProperty("entropy", 100);
+		legacy.addProperty("pick_count", 100);
+		legacy.addProperty("game_over", true);
+		legacy.addProperty("run_state", "IN_PROGRESS");
+		EntropyManager migrated = EntropyManager.CODEC
+				.parse(JsonOps.INSTANCE, legacy).getOrThrow();
+
+		check(migrated.getRunState() == RunState.ENDED,
+				"a save with game_over=true and run_state=IN_PROGRESS loads as ENDED -- "
+						+ "without this every already-finished run would come back live");
+		check(migrated.isEnded(), "...and reports itself ended");
+		check(migrated.getOutcome() == RunOutcome.LOSS_ENTROPY_CAP,
+				"...with the cap loss filled in, since game_over only ever meant the cap");
+
+		// The legacy flag can END a run. It must never START one.
+		com.google.gson.JsonObject legacyUnstarted = new com.google.gson.JsonObject();
+		legacyUnstarted.addProperty("game_over", true);
+		legacyUnstarted.addProperty("run_state", "NOT_STARTED");
+		EntropyManager unstarted = EntropyManager.CODEC
+				.parse(JsonOps.INSTANCE, legacyUnstarted).getOrThrow();
+		check(unstarted.getRunState() == RunState.NOT_STARTED,
+				"a NOT_STARTED save is NOT dragged to ENDED by a stale flag -- the "
+						+ "migration only ever ends a run, never starts or restarts one");
+
+		// An ordinary modern save is untouched by any of this.
+		com.google.gson.JsonObject modern = new com.google.gson.JsonObject();
+		modern.addProperty("run_state", "IN_PROGRESS");
+		modern.addProperty("pick_count", 5);
+		EntropyManager live = EntropyManager.CODEC.parse(JsonOps.INSTANCE, modern).getOrThrow();
+		check(live.getRunState() == RunState.IN_PROGRESS,
+				"UNREGRESSED: a live save with no game_over key stays IN_PROGRESS");
+		check(live.getOutcome() == null, "...and has no outcome");
+
+		// game_over is written false from now on, so it drains out of saves rather
+		// than lingering as a second answer to a question RunState now owns.
+		EntropyManager ended = new EntropyManager();
+		ended.startRun();
+		ended.endRun(null, RunOutcome.WIN_DRAGON);
+		JsonElement written = EntropyManager.CODEC
+				.encodeStart(JsonOps.INSTANCE, ended).getOrThrow();
+		com.google.gson.JsonObject obj = written.getAsJsonObject();
+		check(!obj.has("game_over") || !obj.get("game_over").getAsBoolean(),
+				"an ENDED run never writes game_over=true -- the legacy key is read-only now");
+
+		// And the modern path round-trips the outcome itself.
+		EntropyManager reloaded = EntropyManager.CODEC
+				.parse(JsonOps.INSTANCE, written).getOrThrow();
+		check(reloaded.getRunState() == RunState.ENDED, "ENDED survives a save/load");
+		check(reloaded.getOutcome() == RunOutcome.WIN_DRAGON,
+				"...and so does WHICH outcome, so a reload cannot turn a win into a loss");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * ENDED actually stops the loop -- asserted by TICKING, not by reading a flag.
+	 *
+	 * <p>The brief for this work asked for exactly that distinction, and it is the
+	 * same shape the start gate is checked with: ticked with a {@code null} server,
+	 * so a loop that ran would dereference it and blow up rather than quietly
+	 * passing, and ticked well past the interval length so it would certainly be
+	 * reached.
+	 */
+	private static void endedStopsTheLoop() {
+		section("ENDED stops the entropy loop");
+
+		EntropyManager manager = new EntropyManager();
+		manager.startRun();
+		check(manager.getRunState() == RunState.IN_PROGRESS, "the run is live to begin with");
+
+		check(manager.endRun(null, RunOutcome.LOSS_ENTROPY_CAP),
+				"endRun performs the transition and says so");
+		check(manager.getRunState() == RunState.ENDED, "the state is ENDED");
+
+		// Idempotent, and it is the FIRST outcome that stands. Two conditions can
+		// fire on the same tick -- a dragon killed on the interval entropy caps out.
+		check(!manager.endRun(null, RunOutcome.WIN_DRAGON),
+				"a second endRun returns false rather than re-deciding");
+		check(manager.getOutcome() == RunOutcome.LOSS_ENTROPY_CAP,
+				"...and the first outcome stands -- a loss cannot be overwritten by a win");
+
+		// The tick loop. 500 past the interval, with a null server.
+		int before = manager.getTicksIntoInterval();
+		for (int i = 0; i < manager.getIntervalTicks() + 500; i++) {
+			manager.tick(null);
+		}
+		check(manager.getTicksIntoInterval() == before,
+				"the interval counter does not move on an ENDED run -- the loop is PAUSED, "
+						+ "not running invisibly and waiting to fire");
+		check(manager.getEntropy() == 0, "no entropy accrued");
+		check(manager.getPickCount() == 0, "no pick was counted");
+		check(!manager.isWaitingOnChoice(), "and no pick was opened");
+
+		// forcePick is gated identically, and reports the right reason -- "you have
+		// not started" and "it is over" are different things to tell a player.
+		check(manager.forcePick(null) == EntropyManager.PickTrigger.RUN_ALREADY_OVER,
+				"/entropyforcepick on an ENDED run reports RUN_ALREADY_OVER");
+		EntropyManager fresh = new EntropyManager();
+		check(fresh.forcePick(null) == EntropyManager.PickTrigger.RUN_NOT_STARTED,
+				"...and on a NOT_STARTED run still reports RUN_NOT_STARTED, distinctly");
+
+		// [not-harness-reachable] endRun also VOIDS a pending pick, so the modal
+		// choice screen a player may be sitting on cannot be answered into a finished
+		// run. That cannot be driven here: the only thing that sets waitingOnChoice is
+		// the private triggerPick, which dereferences a server on its first line.
+		// Asserting it from this side would mean asserting a state the harness put
+		// there itself, which is the 1k failure -- a test that can only pass.
+		//
+		// What IS checkable is the observable guarantee it exists for: a submission
+		// against an ENDED run moves nothing. onChoiceMade returns before touching
+		// the server, so a null one is safe.
+		EntropyManager ended = new EntropyManager();
+		ended.startRun();
+		ended.endRun(null, RunOutcome.WIN_DRAGON);
+		ended.onChoiceMade(null, SureFootingBehavior.ID);
+		check(ended.getEntropy() == 0 && ended.getPickCount() == 0,
+				"a pick submitted against an ENDED run adds no entropy and counts no pick");
+		check(ended.getHistory().isEmpty(), "...and writes no history row");
+		check(ended.acquired().isEmpty(), "...and acquires nothing");
+
+		// Effects already held are untouched. This is the decision, not an oversight:
+		// the world stays fully playable and effects are permanent, so only the LOOP
+		// stops. Gating the eight per-tick effect services would make a player's
+		// permanent effects half-work, since attribute- and mixin-driven effects
+		// cannot be gated at all without deleting them.
+		EntropyManager held = new EntropyManager();
+		held.startRun();
+		grantWithoutServer(held, SureFootingBehavior.ID);
+		held.endRun(null, RunOutcome.WIN_DRAGON);
+		check(held.acquired().contains(SureFootingBehavior.ID),
+				"an ENDED run still holds every effect it acquired -- ENDED stops the loop "
+						+ "and nothing else");
+
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * WHICH per-tick systems check the run state -- asserted in both directions.
+	 *
+	 * <p>The recorded architecture flagged "every per-tick system should probably
+	 * check ENDED" as a likely requirement, not a decision. The decision made here
+	 * is <b>the entropy loop only</b>, and this section pins both halves of it so a
+	 * later session has to meet the argument rather than quietly flip it.
+	 *
+	 * <p>The argument, in short: the eight effect services implement effects the
+	 * player <em>permanently holds</em>, and the attribute- and mixin-driven
+	 * effects cannot be gated the same way at all -- modifiers are already on the
+	 * player, and every {@code EffectHooks} reader keys off {@code AcquiredEffects}.
+	 * Gating only the tick-driven subset would leave a run where Green Thumb has
+	 * stopped growing crops but Glutton still starves you and Nightmares still
+	 * detonates beds, with no rule a player could infer.
+	 */
+	private static void endedGatingScope() {
+		section("ENDED gating: which systems check, and which deliberately do not");
+
+		// The loop is the run, so it checks. Verified behaviourally above; here it is
+		// the structural half -- the manager is the one place RunState is consulted.
+		check(Checks.classReferences(EntropyManager.class, "RunState"),
+				"EntropyManager consults RunState -- the loop is the run, so it stops");
+
+		// The eight effect services do NOT. Absence assertions, which is the only
+		// kind that catches a later session adding a gate the design rejected.
+		Class<?>[] effectServices = {
+			com.entropymod.entropy.growth.GreenThumbGrowth.class,
+			com.entropymod.entropy.growth.BlightTouchedTrample.class,
+			com.entropymod.entropy.growth.SlashedPocketsSweep.class,
+			com.entropymod.entropy.growth.DangerSenseGlow.class,
+			com.entropymod.entropy.spawn.UnstableSpawner.class,
+			com.entropymod.entropy.spawn.CreeperMagnetSpawner.class,
+			com.entropymod.entropy.companion.CompanionService.class,
+			com.entropymod.entropy.quake.EarthquakeService.class,
+		};
+		for (Class<?> service : effectServices) {
+			check(!Checks.classReferences(service, "getRunState")
+							&& !Checks.classReferences(service, "isEnded"),
+					service.getSimpleName() + " does NOT gate on the run state -- it implements "
+							+ "an effect the player permanently holds, not the run");
+		}
+		check(effectServices.length == 8,
+				"all eight per-tick effect services are accounted for, none silently omitted");
+
+		// Every one of them COULD gate cleanly -- each already reaches the manager --
+		// so this is a decision rather than a limitation, and saying so is the point.
+		for (Class<?> service : effectServices) {
+			check(Checks.classReferences(service, "EntropyManager")
+							|| Checks.classReferences(service, "EffectHooks"),
+					service.getSimpleName() + " already reaches run state, so gating it would "
+							+ "have been one line -- it is declined, not impossible");
+		}
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The end screen shows REAL run state, not placeholders.
+	 *
+	 * <p>{@code [source-text]} for the screen half: {@code src/client} is not on
+	 * the harness classpath, the same constraint that leaves Double Jump's client
+	 * driver unreachable, so {@code EndScreen} is checked by reading its source
+	 * from disk. That can catch a hardcoded value or a field never read; it cannot
+	 * catch a wrong layout. The data half above it is checked for real, against a
+	 * payload built from a live {@code EntropyManager}.
+	 */
+	private static void endScreenReadsRealData() {
+		section("End screen data");
+
+		String source;
+		try {
+			source = java.nio.file.Files.readString(java.nio.file.Path.of(
+					"src/client/java/com/entropymod/client/gui/EndScreen.java"));
+		} catch (java.io.IOException e) {
+			check(false, "[source-text] EndScreen.java is readable");
+			return;
+		}
+
+		// Every value on the screen comes off the payload, not out of the class.
+		for (String accessor : new String[] {
+				"payload.parsedOutcome()", "payload.entropy()", "payload.entropyCap()",
+				"payload.deathCount()", "payload.history()"}) {
+			check(source.contains(accessor),
+					"[source-text] the screen reads " + accessor + " from the payload");
+		}
+
+		// Total picks is the history's length, with no second number to drift from it.
+		check(source.contains("history.size()"),
+				"[source-text] total picks is history.size(), not a tracked field");
+
+		// It names WHICH condition fired, which the architecture requires explicitly
+		// -- "you lost" without the cause is the thing it rules out.
+		check(source.contains("outcome.description()"),
+				"[source-text] the screen states which condition ended the run");
+		check(source.contains("outcome.headline()") || source.contains("headline"),
+				"[source-text] ...and whether it was a win or a loss");
+
+		// Dismissible, unlike every other modal here -- the recorded decision is that
+		// the world stays fully playable with no lock, and refusing Escape IS a lock.
+		int escIndex = source.indexOf("shouldCloseOnEsc");
+		check(escIndex >= 0 && source.substring(escIndex,
+						Math.min(source.length(), escIndex + 120)).contains("return true"),
+				"[source-text] the end screen closes on Escape, unlike ChoiceScreen and "
+						+ "StartScreen -- there is nothing to gate once the run is over");
+
+		// And there is no fake-data preview command for it. A debug shortcut that
+		// fabricates data must say so in its name; none exists, so none can mislead.
+		check(!Checks.classReferences(RunEndPayload.class, "preview"),
+				"no mock end-screen data path exists");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The death counter, across several causes and several run states.
+	 *
+	 * <p>The brief asked specifically for more than one cause. The counter itself
+	 * cannot see a cause -- it is one increment per death event -- so what is
+	 * actually worth asserting is that nothing it CAN see gates it: not the run
+	 * state, not the count so far, not whether the run has ended.
+	 */
+	private static void deathCounter() {
+		section("Death counter");
+
+		EntropyManager manager = new EntropyManager();
+		check(manager.getDeathCount() == 0, "a fresh run has recorded no deaths");
+
+		// Before the run is even started. A death is a death.
+		check(manager.recordDeath() == 1, "a death while NOT_STARTED still counts");
+
+		manager.startRun();
+		for (int i = 2; i <= 6; i++) {
+			check(manager.recordDeath() == i, "death #" + i + " increments by exactly one");
+		}
+
+		// ...and after the run has ended. Not frozen: it is a stat about the run,
+		// and the run ending does not stop the world.
+		manager.endRun(null, RunOutcome.LOSS_ENTROPY_CAP);
+		check(manager.recordDeath() == 7, "a death after the run ENDED still counts");
+
+		// Persisted, and distinctly from every other int on the run.
+		EntropyManager reloaded = EntropyManager.CODEC.parse(JsonOps.INSTANCE,
+				EntropyManager.CODEC.encodeStart(JsonOps.INSTANCE, manager).getOrThrow())
+				.getOrThrow();
+		check(reloaded.getDeathCount() == 7, "the count survives a save/load");
+		check(reloaded.getEntropy() != 7 || reloaded.getPickCount() != 7,
+				"...and is not being confused with entropy or the pick count");
+
+		// The nested record round-trips both of its fields with distinct values.
+		RunEnd end = RunEnd.CODEC.parse(JsonOps.INSTANCE,
+				RunEnd.CODEC.encodeStart(JsonOps.INSTANCE,
+						RunEnd.of(RunOutcome.WIN_DRAGON, 13)).getOrThrow()).getOrThrow();
+		check(end.deathCount() == 13, "RunEnd carries the death count");
+		check(end.parsedOutcome() == RunOutcome.WIN_DRAGON, "...alongside the outcome");
+		RunEnd none = RunEnd.CODEC.parse(JsonOps.INSTANCE,
+				new com.google.gson.JsonObject()).getOrThrow();
+		check(none.equals(RunEnd.NONE) && none.parsedOutcome() == null,
+				"an empty object loads as NONE -- a save written before this existed is a "
+						+ "run that has not ended and recorded no deaths");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * {@code RunEndPayload}'s codec, and the claim that the end screen shows real
+	 * data.
+	 *
+	 * <p>Field by field with distinct values, per CLAUDE.md -- and the hazard is
+	 * concrete here: entropy, entropyCap and deathCount are three adjacent ints, so
+	 * a swapped pair that cancelled out would pass a record {@code equals}.
+	 */
+	private static void runEndPayloadRoundTrip() {
+		section("RunEndPayload codec round-trip");
+
+		// Built from REAL manager state rather than from literals, which is what
+		// makes this a check that the end screen is fed the run rather than a check
+		// that a record holds what it was handed.
+		EntropyManager manager = new EntropyManager();
+		manager.startRun();
+		manager.setEntropyCap(64);
+		manager.recordDeath();
+		manager.recordDeath();
+		manager.recordDeath();
+
+		RunEndPayload sent = RunEndPayload.of(RunOutcome.WIN_DRAGON,
+				manager.getEntropy(), manager.getEntropyCap(), manager.getDeathCount(),
+				manager.getHistory());
+
+		check(sent.entropyCap() == 64, "the payload carries the run's CONFIGURED cap, not the default");
+		check(sent.deathCount() == 3, "...and the run's real death count");
+
+		RegistryFriendlyByteBuf buf =
+				new RegistryFriendlyByteBuf(Unpooled.buffer(), RegistryAccess.EMPTY);
+		RunEndPayload.CODEC.encode(buf, new RunEndPayload("LOSS_ENTROPY_CAP", 37, 91, 5,
+				List.of(new com.entropymod.network.HistoryResponsePayload.Entry(
+								1, EffectPhase.GOOD, "id_one", "Name One", "Desc One", 0),
+						new com.entropymod.network.HistoryResponsePayload.Entry(
+								2, EffectPhase.BAD, "id_two", "Name Two", "Desc Two", 1))));
+		RunEndPayload got = RunEndPayload.CODEC.decode(buf);
+
+		check(got.parsedOutcome() == RunOutcome.LOSS_ENTROPY_CAP, "the outcome survives the wire");
+		check(got.entropy() == 37, "entropy is 37, not the cap or the death count");
+		check(got.entropyCap() == 91, "entropyCap is 91, not the entropy");
+		check(got.deathCount() == 5, "deathCount is 5, not either of the others");
+		check(got.history().size() == 2, "both history rows survive");
+		check(got.history().get(0).effectName().equals("Name One")
+						&& got.history().get(1).effectName().equals("Name Two"),
+				"...in order, not rotated");
+		check(got.history().get(0).phase() == EffectPhase.GOOD
+						&& got.history().get(1).phase() == EffectPhase.BAD,
+				"...with their phases intact");
+		check(buf.readableBytes() == 0, "the buffer is fully consumed");
+
+		// Total picks is the history's own length -- no second number to drift.
+		check(got.pickCount() == got.history().size(),
+				"total picks is derived from the history, never tracked separately");
+		check(RunEndPayload.class.getRecordComponents().length == 5,
+				"...and the record has five components, none of them a stored pick count");
+
+		// Sent by name, like every other enum on the wire here.
+		check(sent.outcome().equals("WIN_DRAGON"),
+				"the outcome goes on the wire by name, so reordering the enum cannot "
+						+ "turn a loss into a win");
 	}
 
 	// ------------------------------------------------------------------

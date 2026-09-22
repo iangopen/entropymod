@@ -4,6 +4,7 @@ import com.entropymod.EntropyMod;
 import com.entropymod.entropy.EffectDefinition;
 import com.entropymod.entropy.EffectRegistry;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.RunOutcome;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
@@ -42,6 +43,7 @@ public final class EntropyCommands {
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			registerForcePick(dispatcher);
 			registerStatus(dispatcher);
+			registerForceEnd(dispatcher);
 			registerGrant(dispatcher);
 		});
 	}
@@ -212,7 +214,7 @@ public final class EntropyCommands {
 							"[Entropy] entropy " + manager.getEntropy() + "/" + manager.getEntropyCap()
 									+ ", picks made " + manager.getPickCount()
 									+ ", next phase " + manager.currentPhase()
-									+ (manager.isGameOver() ? ", RUN OVER" : "")
+									+ (manager.isEnded() ? ", RUN OVER -- " + manager.getOutcome() : "")
 									+ (manager.isWaitingOnChoice() ? ", waiting on a choice" : "")), false);
 					source.sendSuccess(() -> Component.literal(
 							"[Entropy] interval " + manager.getTicksIntoInterval() + "/"
@@ -220,6 +222,59 @@ public final class EntropyCommands {
 					source.sendSuccess(() -> Component.literal(
 							"[Entropy] acquired (" + manager.acquired().size() + "): "
 									+ (manager.acquired().isEmpty() ? "(none)" : manager.acquired().toString())), false);
+					source.sendSuccess(() -> Component.literal(
+							"[Entropy] deaths this run: " + manager.getDeathCount()), false);
+					return 1;
+				}));
+	}
+
+	/**
+	 * {@code /entropyforcewin} and {@code /entropyforceloss}.
+	 *
+	 * <p><b>REAL paths, not debug imitations</b> -- the same standard
+	 * {@code /entropyforcepick} is held to. Each calls the one
+	 * {@link EntropyManager#endRun} that the entropy cap and the dragon-death
+	 * listener call, so a forced ending persists, pushes the same end screen,
+	 * stops the loop the same way and records the same outcome. If a future edit
+	 * makes either of these set state directly or build its own payload, that is a
+	 * bug: it would stop testing the thing it exists to test.
+	 *
+	 * <p><b>What they do NOT test is the detection.</b> Forcing a win exercises
+	 * everything downstream of "the dragon died" and nothing upstream of it. They
+	 * exist because {@code EnderDragon} overrides {@code kill(ServerLevel)} to
+	 * bypass {@code die()} entirely, so {@code /kill} on a dragon fires no death
+	 * event and the win path was otherwise only reachable by fighting one.
+	 *
+	 * <p>Both report refusal out loud. {@code endRun} is idempotent and returns
+	 * false on an already-ended run, and a command that silently did nothing would
+	 * be indistinguishable from a broken one -- the lesson {@code /entropyhistory}
+	 * already cost this project once.
+	 */
+	private static void registerForceEnd(CommandDispatcher<CommandSourceStack> dispatcher) {
+		registerForceEnd(dispatcher, "entropyforcewin", RunOutcome.WIN_DRAGON);
+		registerForceEnd(dispatcher, "entropyforceloss", RunOutcome.LOSS_ENTROPY_CAP);
+	}
+
+	private static void registerForceEnd(CommandDispatcher<CommandSourceStack> dispatcher,
+										 String name, RunOutcome outcome) {
+		dispatcher.register(Commands.literal(name)
+				.requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+				.executes(ctx -> {
+					CommandSourceStack source = ctx.getSource();
+					EntropyManager manager = EntropyManager.get(source.getServer());
+					if (!manager.isStarted()) {
+						source.sendFailure(Component.literal(
+								"[Entropy] The run has not been started -- nothing to end."));
+						return 0;
+					}
+					if (!manager.endRun(source.getServer(), outcome)) {
+						source.sendFailure(Component.literal(
+								"[Entropy] The run already ended as " + manager.getOutcome()
+										+ " -- the first outcome stands."));
+						return 0;
+					}
+					source.sendSuccess(() -> Component.literal(
+							"[Entropy] Run ended: " + outcome + "."), true);
 					return 1;
 				}));
 	}

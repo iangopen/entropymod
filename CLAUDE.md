@@ -434,6 +434,123 @@ mixin target one method, scope each to the side it is the authority for** — he
 one ever acts. This failure mode is invisible to the build.
 
 
+### Run lifecycle — FULLY BUILT, all three states and both end conditions
+`NOT_STARTED -> IN_PROGRESS -> ENDED`. The front half (the start gate, the modal
+panel, the keybind snapshot) shipped earlier; the `ENDED` half — the state, both
+reachable end conditions, the death counter and the end screen — is now built
+too. Per-piece status lives in the `entropy-design` skill.
+
+**`gameOver` is gone, and this is the reconciliation it needed.** For several
+sessions the project carried *two* unreconciled notions of "the run is over": a
+`gameOver` boolean set when entropy hit the cap (which predated run states), and
+a `RunState` enum that deliberately had no `ENDED` constant. There is now one.
+`RunState.ENDED` holds it, `RunOutcome` says which condition fired, and
+`EntropyManager.endRun(server, outcome)` is the **single entry point** every path
+goes through.
+
+- **`endRun` is idempotent, and that is correctness rather than tidiness.** Two
+  conditions can fire on the same tick — a dragon killed on the interval entropy
+  caps out. Whichever lands first stands; a win can never be overwritten by a
+  loss or the reverse.
+- **It voids any pending pick** (`waitingOnChoice` cleared, offer forgotten), so
+  the modal choice screen a player may be sitting on cannot be answered into a
+  finished run. The end screen replaces it client-side.
+- **The persisted `game_over` key is still READ, once, and never written true.**
+  That is the migration, and it is the one thing here that could silently break
+  an existing world: an old save can carry `game_over: true` with `run_state:
+  IN_PROGRESS`, so reading `run_state` alone would load every already-finished
+  run as live and immediately re-announce an ending the player already saw. The
+  legacy flag can *end* a run and never *start* one, and both directions are
+  asserted. Same rule as `second_chance_used`: the Java field is cosmetic, the
+  codec key is not.
+
+#### ENDED stops the LOOP, and deliberately nothing else
+This was recorded as "likely required, not yet decided" for every per-tick
+system. **Decided: the entropy loop only.** `EntropyManager.tick` is the sole
+per-tick system that consults the run state. The eight effect services —
+`GreenThumbGrowth`, `BlightTouchedTrample`, `SlashedPocketsSweep`,
+`DangerSenseGlow`, `UnstableSpawner`, `CreeperMagnetSpawner`, `CompanionService`,
+`EarthquakeService` — do **not**, and the harness asserts that absence per
+service so a later session has to meet the argument rather than quietly flip it.
+
+**Every one of them *could* gate cleanly** — each already calls
+`EntropyManager.get(server)`, so it is one line — which is what makes this a
+decision rather than a limitation. The argument against:
+
+> **Attribute effects and mixin/hook effects cannot be gated the same way at
+> all.** Modifiers are already on the player and nothing removes them on end;
+> every `EffectHooks` reader keys off `AcquiredEffects`. Gating only the
+> tick-driven subset would produce a run where Green Thumb has stopped growing
+> crops but Glutton still starves you and Nightmares still detonates beds — the
+> player's permanent effects half-working, with no rule they could infer.
+
+Making it consistent the other way means deactivating the whole acquired set on
+end, which contradicts both "effects are permanent" and the recorded decision
+that **the world stays fully playable after the run ends, with no lock**. So:
+the run stops, the effects you earned stay yours.
+
+#### The two end conditions
+| # | Trigger | Outcome | Hook |
+|---|---|---|---|
+| 1 | Entropy reaches the cap | `LOSS_ENTROPY_CAP` | `triggerPick`, before rolling |
+| 2 | First Ender Dragon kill | `WIN_DRAGON` | `ServerLivingEntityEvents.AFTER_DEATH` |
+| 3 | Death under Become Hardcore | *not built* | — |
+
+**Path 3 needs no architecture change.** It is one `RunOutcome` constant
+(`LOSS_HARDCORE_DEATH`, `win = false`) plus one `endRun` call from the death
+listener **that already exists** for the death counter. The constant is
+deliberately absent today, on the same rule that kept `ENDED` itself out until
+something could produce it, and the harness asserts both its absence *and* that
+every piece it will plug into is present.
+
+#### Dragon-death detection — Open Question 1, RESOLVED
+Read `RunEndDetector` before changing any of this.
+
+- **The hook is the Fabric event, not a mixin**, and that is load-bearing.
+  `ServerPlayer.die` is a complete reimplementation that **never calls
+  `super.die`** — there is not one `.die:(` reference anywhere in `ServerPlayer`.
+  A hand-rolled `LivingEntity.die` inject would therefore have counted **zero**
+  player deaths while applying perfectly (failure mode 1). Fabric already
+  absorbed this: `LivingEntityMixin` fires `AFTER_DEATH` from `LivingEntity.die`
+  and a *second* injection in `ServerPlayerMixin` fires it from
+  `ServerPlayer.die`. One event, two routes, exactly once each.
+- **"First kill only" is VANILLA'S record.** `EnderDragonFight
+  .hasPreviouslyKilledDragon()` is public, lives on a `SavedData`, and is what
+  vanilla itself uses to decide whether a dragon egg drops. Reached via
+  `ServerLevel.getDragonFight()`. **No parallel tracking.**
+- **The timing is the crux and it goes the right way.** `setDragonKilled` sets
+  that flag at its offset **79**; its caller is `EnderDragon.tickDeath` at offset
+  **409**, i.e. the end of the ~200-tick death animation — so `die()` and this
+  event fire ~200 ticks *earlier*, while the flag still holds its **pre-kill**
+  value. A re-fight of a resurrected dragon reads `true` and is declined.
+- **Known gap:** `EnderDragon` overrides `kill(ServerLevel)` to call `remove` and
+  `setDragonKilled` directly, bypassing `die()`. So **`/kill` on a dragon fires
+  nothing.** A dragon killed by damage always goes through `die`, so this is a
+  testing concern; `/entropyforcewin` covers it.
+
+#### The death counter
+One persisted int, all causes, incremented from the same `AFTER_DEATH` listener.
+**Not gated on the run state** — a death before Start or after the run ends is
+still a death this world saw — and **not frozen when the run ends**, because the
+run ending does not stop the world.
+
+#### The end screen
+`EndScreen`, pushed by `RunEndPayload` on the transition. Shows the outcome and
+**which condition fired**, final entropy against the run's configured cap, total
+picks, the full pick history, and the death count.
+
+- **Total picks is `history.size()`.** No new tracking, per the recorded
+  architecture — and a separate count could drift from the list it describes.
+- **Every value is server state the client cannot derive.** Entropy is only
+  synced when a pick opens, history only if asked for, and the death count never.
+  So the whole screen is fed from the payload.
+- **It is the one dismissible modal in this mod.** `ChoiceScreen` and
+  `StartScreen` are gates and refuse Escape; there is nothing to gate once the
+  run is over, and refusing Escape here *would be* the lock that was explicitly
+  decided against. Dismissing it closes it and does nothing else — no packet, no
+  state. It is shown once and has **no client-tick re-open guard**, unlike
+  `StartScreen`, for the same reason.
+
 ### Pick history — BUILT
 `PickRecord` (pick number, phase, effect id/name/description, entropy at the
 time) appended in `onChoiceMade`, exposed via `EntropyManager.getHistory()`.
@@ -465,6 +582,8 @@ test command.
 | `/entropygrant <effect_id>` | server | **YES** — the real acquisition path |
 | `/entropystatus` | server | **YES** — reads real manager state |
 | `/entropyhistory` | client → server | **YES** — real request/response, prints to chat |
+| `/entropyforcewin` | server | **YES** — the real `endRun` |
+| `/entropyforceloss` | server | **YES** — the real `endRun` |
 | `/entropypreview` | client only | **NO** — hardcoded fake data |
 
 #### `/entropygrant` is the standard way to test a specific effect
@@ -506,10 +625,12 @@ Three properties that are deliberate, not incidental:
 `triggerPick` the tick loop uses — same entropy-cap check, same interval-scoped
 expiry, same phase alternation, same anti-stacking roll, same
 `OpenChoicePayload`. It bypasses the clock and *nothing else*. Its guards
-(`gameOver`, `waitingOnChoice`) are exactly the ones `tick()` applies before it
-would reach `triggerPick`, so a forced pick can't reach a state a real interval
-firing couldn't. It returns a `PickTrigger` so the command can say *why* nothing
-opened instead of failing silently.
+(the run state, `waitingOnChoice`) are exactly the ones `tick()` applies before
+it would reach `triggerPick`, so a forced pick can't reach a state a real
+interval firing couldn't. It returns a `PickTrigger` so the command can say *why*
+nothing opened instead of failing silently — and `RUN_NOT_STARTED` and
+`RUN_ALREADY_OVER` are deliberately distinct, because "you haven't started" and
+"it's over" are different things to tell a player.
 
 **If a future session makes this command roll its own choices or build its own
 payload, that is a bug**, not an optimisation — it would stop testing the thing

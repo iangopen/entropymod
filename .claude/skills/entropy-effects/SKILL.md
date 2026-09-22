@@ -994,9 +994,25 @@ requires `waitingOnChoice`. Collapsing them would make the wire value depend on
 when it was asked.
 
 #### Become Hardcore — INVESTIGATED, NOT BUILT. Verdict: buildable as specified
-> **Superseded as the implementation approach** — see "Run Lifecycle: first slice
-> BUILT, ENDED half still design-only" below. The findings here remain accurate and are kept
-> as reference; the effect will use a mod-tracked flag instead.
+> **Superseded as the implementation approach** — see "Run Lifecycle: FULLY BUILT"
+> in the `entropy-design` skill, and the run-lifecycle section of CLAUDE.md. The
+> findings here remain accurate and are kept as reference; the effect will use a
+> mod-tracked flag instead.
+>
+> **The state it plugs into now exists and is finished.** `RunState.ENDED`,
+> `RunOutcome`, and `EntropyManager.endRun(server, outcome)` are all built, and
+> `endRun` is idempotent, persists the outcome, stops the loop, voids any pending
+> pick and pushes the end screen. Building this effect is **one `RunOutcome`
+> constant (`LOSS_HARDCORE_DEATH`, `win = false`) plus one `endRun` call from the
+> `ServerLivingEntityEvents.AFTER_DEATH` listener in `RunEndDetector` that already
+> exists for the death counter.** No architecture in `EntropyManager`, `RunState`
+> or the end screen needs to change, and the harness asserts both the constant's
+> absence and the presence of every piece it will use.
+>
+> Note the spectator-related caveats below are **moot** under the mod-tracked
+> approach: vanilla death and respawn proceed normally, so there is no permanently
+> spectating player, and the two tick services this section says would need a
+> spectator guard are unaffected by it.
 
 Full javap investigation, no code written. Recorded because the answer is
 non-obvious in both directions and re-deriving it would cost a session.

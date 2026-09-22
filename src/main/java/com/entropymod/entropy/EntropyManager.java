@@ -9,6 +9,7 @@ import com.entropymod.entropy.behavior.PhoenixChamberedHeartBehavior;
 import com.entropymod.entropy.behavior.SecondGuessBehavior;
 import com.entropymod.network.ClientEffectsPayload;
 import com.entropymod.network.OpenChoicePayload;
+import com.entropymod.network.RunEndPayload;
 import com.entropymod.network.RunSyncPayload;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
@@ -74,7 +75,13 @@ public class EntropyManager extends SavedData {
 	public static final Codec<EntropyManager> CODEC = RecordCodecBuilder.create(instance -> instance.group(
 			Codec.INT.optionalFieldOf("entropy", 0).forGetter(m -> m.entropy),
 			Codec.INT.optionalFieldOf("pick_count", 0).forGetter(m -> m.pickCount),
-			Codec.BOOL.optionalFieldOf("game_over", false).forGetter(m -> m.gameOver),
+			// LEGACY, read-only. This key was the whole of "the run is over" before
+			// RunState.ENDED existed. It is still READ so a save written by an older
+			// build migrates (see the codec constructor), and always WRITTEN false so
+			// it drains out of saves rather than lingering as a second answer to a
+			// question RunState now owns. Removing the line entirely would silently
+			// revive every already-finished run as IN_PROGRESS on its next load.
+			Codec.BOOL.optionalFieldOf("game_over", false).forGetter(m -> false),
 			Codec.INT.optionalFieldOf("entropy_cap", DEFAULT_ENTROPY_CAP).forGetter(m -> m.entropyCap),
 			Codec.INT.optionalFieldOf("interval_ticks", DEFAULT_INTERVAL_TICKS).forGetter(m -> m.intervalTicks),
 			Codec.STRING.listOf().optionalFieldOf("acquired", List.of())
@@ -110,7 +117,11 @@ public class EntropyManager extends SavedData {
 			// and this codec was already at 13 -- see MetaRunState for the full note.
 			// Still optionalFieldOf with a default at BOTH levels, so a save written
 			// before the meta effects existed loads as a run holding none of them.
-			MetaRunState.CODEC.optionalFieldOf("meta", MetaRunState.EMPTY).forGetter(m -> m.meta())
+			MetaRunState.CODEC.optionalFieldOf("meta", MetaRunState.EMPTY).forGetter(m -> m.meta()),
+			// How the run ended, and the death count the end screen reports. Nested
+			// for the same hard reason MetaRunState is: group() tops out at 16 and
+			// this codec was at 14. See RunEnd.
+			RunEnd.CODEC.optionalFieldOf("run_end", RunEnd.NONE).forGetter(m -> m.runEnd())
 	).apply(instance, EntropyManager::new));
 
 	private static final SavedDataType<EntropyManager> TYPE = new SavedDataType<>(
@@ -134,7 +145,23 @@ public class EntropyManager extends SavedData {
 
 	private int entropy = 0;
 	private int pickCount = 0;
-	private boolean gameOver = false;
+	/**
+	 * How the run ended, or {@code null} while it has not.
+	 *
+	 * <p>Always {@code null} unless {@link #runState} is {@link RunState#ENDED},
+	 * and never null when it is -- {@link #endRun} is the only writer of either
+	 * and sets both together, so the pair cannot disagree.
+	 */
+	private RunOutcome outcome = null;
+
+	/**
+	 * Player deaths this run, all causes.
+	 *
+	 * <p>Counted from the first death onward and <b>not</b> frozen when the run
+	 * ends -- it is a stat about the run, and the run ending does not stop the
+	 * world. Surfaced only on the end screen and by {@code /entropystatus}.
+	 */
+	private int deathCount = 0;
 
 	/**
 	 * Second Guess's one-shot reroll, spent for the whole run.
@@ -232,10 +259,15 @@ public class EntropyManager extends SavedData {
 	 * Where the run is in its lifecycle. <b>Gates the whole tick loop</b> -- see
 	 * {@link #tick}.
 	 *
-	 * <p>Only {@code NOT_STARTED} and {@code IN_PROGRESS} exist; the {@code ENDED}
-	 * half of the recorded architecture is not built. Note this is <em>not</em>
-	 * {@link #gameOver}, which is the older entropy-cap stop and is untouched by
-	 * this; merging the two belongs with the unbuilt {@code ENDED} work.
+	 * <p>All three states exist. {@code ENDED} <b>replaced</b> the old
+	 * {@code gameOver} boolean rather than sitting beside it -- for several
+	 * sessions this class carried two unreconciled notions of "the run is over",
+	 * and there is now exactly one. {@link #endRun} is the only writer.
+	 *
+	 * <p><b>This is the ONLY per-tick system in the mod that consults the run
+	 * state.</b> The eight effect services do not, deliberately: they implement
+	 * effects the player permanently holds, and attribute- and mixin-driven
+	 * effects cannot be gated at all. See CLAUDE.md's run-lifecycle section.
 	 */
 	private RunState runState = RunState.NOT_STARTED;
 
@@ -302,12 +334,12 @@ public class EntropyManager extends SavedData {
 	public EntropyManager() {}
 
 	/** Codec constructor. */
-	private EntropyManager(int entropy, int pickCount, boolean gameOver, int entropyCap, int intervalTicks,
+	private EntropyManager(int entropy, int pickCount, boolean legacyGameOver, int entropyCap, int intervalTicks,
 						   List<String> acquiredIds, List<PickRecord> history, boolean rerollUsed,
 						   String moveScramble, boolean phoenixHeartUsed, Optional<String> runState,
 						   Map<String, KeybindSnapshot> keybindSnapshots,
 						   Map<String, List<String>> companions,
-						   MetaRunState meta) {
+						   MetaRunState meta, RunEnd runEnd) {
 		this.companions = new CompanionRoster(companions);
 		this.rerollCharges = Math.max(0, meta.rerollCharges());
 		this.rerollsForbidden = meta.rerollsForbidden();
@@ -322,7 +354,8 @@ public class EntropyManager extends SavedData {
 		this.extremeTierPending = meta.extremeTierPending();
 		this.entropy = entropy;
 		this.pickCount = pickCount;
-		this.gameOver = gameOver;
+		this.deathCount = Math.max(0, runEnd.deathCount());
+		this.outcome = runEnd.parsedOutcome();
 		this.entropyCap = entropyCap;
 		this.intervalTicks = intervalTicks;
 		acquiredIds.forEach(this.acquired::add);
@@ -343,9 +376,32 @@ public class EntropyManager extends SavedData {
 		// is deliberately not inferred from the acquired set, because /entropygrant
 		// adds effects without advancing the run and works while NOT_STARTED -- a
 		// granted effect must not be mistaken for a started run.
-		this.runState = runState
+		RunState parsed = runState
 				.map(RunState::parse)
 				.orElseGet(() -> pickCount > 0 ? RunState.IN_PROGRESS : RunState.NOT_STARTED);
+
+		// SECOND migration, and it is the one that would have been easy to miss.
+		//
+		// Before RunState.ENDED existed, a run that hit the entropy cap was recorded
+		// as game_over = true while run_state stayed IN_PROGRESS -- the two concepts
+		// were never reconciled. Reading run_state alone would therefore load every
+		// already-finished run as live, and it would immediately re-fire the cap
+		// check and re-announce an ending the player already saw.
+		//
+		// The legacy flag wins over an IN_PROGRESS state for that reason, and only
+		// in that direction: it can end a run, never restart one.
+		if (legacyGameOver && parsed != RunState.NOT_STARTED) {
+			parsed = RunState.ENDED;
+		}
+		this.runState = parsed;
+
+		// An ENDED run with no recorded outcome is exactly what a migrated legacy
+		// save looks like: game_over only ever meant the cap. Filling it in here
+		// keeps the "ENDED implies an outcome" invariant true for old saves too,
+		// so the end screen never has to render a run that ended for no reason.
+		if (this.runState == RunState.ENDED && this.outcome == null) {
+			this.outcome = RunOutcome.LOSS_ENTROPY_CAP;
+		}
 
 		keybindSnapshots.forEach((uuid, snapshot) -> {
 			if (snapshot != null && snapshot.isPresent()) {
@@ -373,7 +429,17 @@ public class EntropyManager extends SavedData {
 		if (runState != RunState.IN_PROGRESS) {
 			return;
 		}
-		if (gameOver || waitingOnChoice) {
+		// The ENDED half of this gate used to be a separate `gameOver` boolean. It
+		// is gone: RunState.ENDED is not IN_PROGRESS, so the check above already
+		// covers it and there is exactly one notion of "the run is over" left.
+		//
+		// This is the ONLY per-tick system that checks the run state. The eight
+		// effect services in EntropyMod's tick block deliberately do not -- they
+		// implement effects the player permanently holds, and attribute- and
+		// mixin-driven effects cannot be gated the same way, so gating only the
+		// tick-driven subset would make a player's permanent effects half-work.
+		// See CLAUDE.md's run-lifecycle section.
+		if (waitingOnChoice) {
 			return;
 		}
 		tickCounter++;
@@ -405,11 +471,14 @@ public class EntropyManager extends SavedData {
 	public PickTrigger forcePick(MinecraftServer server) {
 		// Gated exactly like tick(): forcePick bypasses the CLOCK and nothing else,
 		// so it must not be a way to reach a state a real interval firing could not.
+		// Two distinct refusals, not one: "you have not started" and "it is over"
+		// are different things to report, which is the whole reason PickTrigger
+		// exists rather than a boolean.
+		if (runState == RunState.ENDED) {
+			return PickTrigger.RUN_ALREADY_OVER;
+		}
 		if (runState != RunState.IN_PROGRESS) {
 			return PickTrigger.RUN_NOT_STARTED;
-		}
-		if (gameOver) {
-			return PickTrigger.RUN_ALREADY_OVER;
 		}
 		if (waitingOnChoice) {
 			return PickTrigger.CHOICE_PENDING;
@@ -420,12 +489,11 @@ public class EntropyManager extends SavedData {
 
 	private PickTrigger triggerPick(MinecraftServer server) {
 		if (entropy >= entropyCap) {
-			gameOver = true;
-			setDirty();
-			server.getPlayerList().broadcastSystemMessage(
-					Component.literal("[Entropy] Entropy has reached " + entropy
-							+ ". The run is over -- did you beat the dragon in time?"),
-					false);
+			// Path 1 of the three into ENDED. This used to set a `gameOver` boolean
+			// that nothing else knew about; it now goes through the same endRun the
+			// dragon-death win uses, so both conditions produce one kind of ending
+			// -- one broadcast, one end screen, one persisted outcome.
+			endRun(server, RunOutcome.LOSS_ENTROPY_CAP);
 			return PickTrigger.RUN_ENDED_NOW;
 		}
 
@@ -766,6 +834,125 @@ public class EntropyManager extends SavedData {
 	// Run lifecycle
 	// ------------------------------------------------------------------
 
+	/**
+	 * Ends the run: {@code IN_PROGRESS -> ENDED}, with the outcome recorded.
+	 *
+	 * <p><b>The single entry point for every path into {@link RunState#ENDED}.</b>
+	 * The entropy cap, the dragon-death win and (later) Become Hardcore all call
+	 * this rather than each setting their own flag -- which is exactly the mistake
+	 * the retired {@code gameOver} boolean represented, two unreconciled notions of
+	 * "the run is over" that never learned about each other.
+	 *
+	 * <p><b>Idempotent, and that is a correctness property rather than a nicety.</b>
+	 * Two conditions can fire on the same tick -- a dragon killed on the interval
+	 * where entropy caps out -- and whichever lands first must stand. A second call
+	 * returns false and changes nothing, so a win can never be overwritten by a
+	 * loss or the reverse.
+	 *
+	 * <p>Three things happen besides the state change, and each is load-bearing:
+	 *
+	 * <ul>
+	 *   <li><b>Any pending pick is voided.</b> {@code waitingOnChoice} is cleared
+	 *       and the offer forgotten, so the modal choice screen a player may be
+	 *       sitting on cannot be answered into a finished run. The end screen
+	 *       replaces it client-side.</li>
+	 *   <li><b>The end screen is pushed to every player</b>, carrying real run
+	 *       state rather than anything the client could guess.</li>
+	 *   <li><b>{@code syncRunToAll}</b>, so the client's cached {@link RunState}
+	 *       matches -- otherwise a client would still believe the run was live.</li>
+	 * </ul>
+	 *
+	 * <p><b>What it deliberately does NOT do: stop anything but the loop.</b> No
+	 * effect is removed, no acquired id dropped, no per-tick effect service
+	 * disabled. The world stays fully playable by decision, and effects are
+	 * permanent. See CLAUDE.md for why gating the effect services would make a
+	 * player's permanent effects half-work.
+	 *
+	 * @return true only on the call that performed the transition
+	 */
+	public boolean endRun(MinecraftServer server, RunOutcome outcome) {
+		if (runState == RunState.ENDED) {
+			EntropyMod.LOGGER.info("Run already ended as {} -- {} ignored, the first outcome stands.",
+					this.outcome, outcome);
+			return false;
+		}
+		if (outcome == null) {
+			EntropyMod.LOGGER.error("endRun called with no outcome -- refused, the run is untouched.");
+			return false;
+		}
+
+		runState = RunState.ENDED;
+		this.outcome = outcome;
+		// The pending offer dies with the run. Cleared BEFORE anything is sent, so
+		// nothing downstream can observe a finished run that is still waiting.
+		waitingOnChoice = false;
+		pendingChoiceIds.clear();
+		setDirty();
+
+		EntropyMod.LOGGER.info("Run ENDED: {} ({}). Entropy {}/{}, {} pick(s), {} death(s).",
+				outcome, outcome.isWin() ? "win" : "loss", entropy, entropyCap,
+				history.size(), deathCount);
+
+		if (server == null) {
+			// Reachable only from the headless harness, which drives the transition
+			// without a server. The state change above is the part it is checking.
+			return true;
+		}
+
+		server.getPlayerList().broadcastSystemMessage(
+				Component.literal("[Entropy] " + outcome.headline() + " -- " + outcome.description()),
+				false);
+		RunEndPayload payload = RunEndPayload.of(outcome, entropy, entropyCap, deathCount, history);
+		for (ServerPlayer player : PlayerLookup.all(server)) {
+			ServerPlayNetworking.send(player, payload);
+		}
+		syncRunToAll(server);
+		return true;
+	}
+
+	/**
+	 * Records one player death, any cause.
+	 *
+	 * <p>Called from the {@code ServerLivingEntityEvents.AFTER_DEATH} listener --
+	 * see {@code RunEndDetector} for why that event is the reliable hook and a
+	 * hand-rolled {@code LivingEntity.die} mixin would have counted zero.
+	 *
+	 * <p><b>Counts on every death, in every run state.</b> Not gated on
+	 * {@code IN_PROGRESS}: a death before the player clicks Start, or after the run
+	 * has ended, is still a death this world saw, and gating it would make the
+	 * number mean something subtler than the end screen claims.
+	 *
+	 * @return the new total
+	 */
+	public int recordDeath() {
+		deathCount++;
+		setDirty();
+		return deathCount;
+	}
+
+	public int getDeathCount() {
+		return deathCount;
+	}
+
+	/** How the run ended, or {@code null} while it has not. */
+	public RunOutcome getOutcome() {
+		return outcome;
+	}
+
+	public boolean isEnded() {
+		return runState == RunState.ENDED;
+	}
+
+	/**
+	 * This run's ending and stats, packaged for the codec.
+	 *
+	 * <p>Built on demand rather than stored, exactly like {@link #meta()}, so
+	 * {@link RunEnd} cannot become a second copy of fields the loop actually reads.
+	 */
+	public RunEnd runEnd() {
+		return RunEnd.of(outcome, deathCount);
+	}
+
 	public RunState getRunState() {
 		return runState;
 	}
@@ -1021,6 +1208,15 @@ public class EntropyManager extends SavedData {
 	public void onChoiceMade(MinecraftServer server, String chosenEffectId) {
 		if (!waitingOnChoice) {
 			return; // ignore stray/duplicate submissions
+		}
+		// A run can end while a pick is open -- the dragon dies mid-choice. endRun
+		// clears waitingOnChoice precisely so this cannot happen, but the check is
+		// kept because the submission comes from a client and must never be able to
+		// add entropy to a finished run.
+		if (runState != RunState.IN_PROGRESS) {
+			EntropyMod.LOGGER.warn("Pick '{}' submitted while the run is {} -- ignored.",
+				chosenEffectId, runState);
+			return;
 		}
 		EffectDefinition chosen = EffectRegistry.byId(chosenEffectId);
 		if (chosen == null) {
@@ -1322,7 +1518,6 @@ public class EntropyManager extends SavedData {
 
 	public boolean isRerollUsed() { return rerollUsed; }
 	public boolean isWaitingOnChoice() { return waitingOnChoice; }
-	public boolean isGameOver() { return gameOver; }
 	public int getTicksIntoInterval() { return tickCounter; }
 	public int getEntropy() { return entropy; }
 	public int getPickCount() { return pickCount; }

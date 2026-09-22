@@ -2,6 +2,7 @@ package com.entropymod.client;
 
 import com.entropymod.EntropyMod;
 import com.entropymod.client.gui.ChoiceScreen;
+import com.entropymod.client.gui.EndScreen;
 import com.entropymod.client.gui.StartScreen;
 import com.entropymod.entropy.EffectPhase;
 import com.entropymod.entropy.RerollState;
@@ -13,6 +14,7 @@ import com.entropymod.network.HistoryRequestPayload;
 import com.entropymod.network.HistoryResponsePayload;
 import com.entropymod.network.KeybindSnapshotPayload;
 import com.entropymod.network.OpenChoicePayload;
+import com.entropymod.network.RunEndPayload;
 import com.entropymod.network.RunSyncPayload;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -71,6 +73,22 @@ public class EntropyModClient implements ClientModInitializer {
 		// side that can actually stop the player -- see TremorLockPayload.
 		ClientPlayNetworking.registerGlobalReceiver(TremorLockPayload.TYPE, (payload, context) -> {
 			ClientRunState.beginTremorLock(payload.ticks());
+		});
+
+		// The run is over. Replaces whatever is on screen, which matters in exactly
+		// one case: a run can end while a pick is open (the dragon dies mid-choice),
+		// and ChoiceScreen has no escape. The server has already voided that pending
+		// pick in endRun, so replacing it strands nothing.
+		//
+		// Shown ONCE, on the transition. There is deliberately no client-tick guard
+		// re-opening it the way StartScreen has -- that guard makes a screen
+		// inescapable, and the recorded decision is that the world stays fully
+		// playable after a run ends.
+		ClientPlayNetworking.registerGlobalReceiver(RunEndPayload.TYPE, (payload, context) -> {
+			EntropyMod.LOGGER.info("Run ended: {} at entropy {}/{} -- {} pick(s), {} death(s).",
+					payload.outcome(), payload.entropy(), payload.entropyCap(),
+					payload.pickCount(), payload.deathCount());
+			context.client().setScreen(new EndScreen(payload));
 		});
 
 		// Run lifecycle. One payload drives three decisions -- see RunSyncPayload.

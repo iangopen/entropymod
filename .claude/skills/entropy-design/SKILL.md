@@ -191,42 +191,45 @@ Two things to know before changing it:
 
 ---
 
-## Run Lifecycle: first slice BUILT, ENDED half still design-only
+## Run Lifecycle: FULLY BUILT, bar Become Hardcore and the settings panel
 
-**Read this status table before touching anything below it.** The architecture
-was recorded as one design; only its front half exists.
+**Read this status table before touching anything below it.**
 
 | Piece | Status |
 |---|---|
-| `NOT_STARTED` / `IN_PROGRESS` states, persisted | **BUILT** |
+| `NOT_STARTED` / `IN_PROGRESS` / `ENDED` states, persisted | **BUILT** |
 | Hard tick-loop gate while `NOT_STARTED` | **BUILT** |
 | Modal start panel with a Start button | **BUILT** |
 | Keybind snapshot captured at Start | **BUILT** |
 | Randomized Controls anchored to that snapshot | **BUILT** |
-| Interval/cap settings **on** the start panel | **NOT BUILT** — deferred |
-| `ENDED` state | **NOT BUILT** — the constant does not exist |
-| End screen | **NOT BUILT** |
-| Dragon-death win detection | **NOT BUILT** — still Open Question 1 |
-| Become Hardcore (death → loss) | **NOT BUILT** |
-| Run-wide death counter | **NOT BUILT** |
+| `ENDED` state, with `RunOutcome` naming which condition fired | **BUILT** |
+| `endRun` — the single entry point for every path in | **BUILT** |
+| Entropy-cap loss, routed through `endRun` | **BUILT** |
+| Dragon-death win detection | **BUILT** — Open Question 1 RESOLVED |
+| Run-wide death counter | **BUILT** |
+| End screen | **BUILT** |
+| `gameOver` → `RunState.ENDED` reconciliation, with save migration | **BUILT** |
+| Become Hardcore (death → loss) | **NOT BUILT** — separate session, and it needs no architecture change |
+| Interval/cap settings **on** the start panel | **NOT BUILT** — deferred, Open Question 4 |
 
-`./gradlew harness` asserts the unbuilt half is *absent* rather than
-half-present — `RunState` has exactly two constants, and there is no `endRun()`
-or `getDeathCount()`. That is deliberate: a later session must be able to tell
-"deferred" from "started and abandoned".
+`./gradlew harness` still asserts the unbuilt pieces are *absent* rather than
+half-present — there is no `LOSS_HARDCORE_DEATH` constant — **and separately
+asserts that every piece Become Hardcore will plug into is present**, so "one
+constant plus one `endRun` call" is a checkable claim rather than a promise.
 
 ### Run states — BUILT (the first transition only)
 
 ```
-NOT_STARTED  ->  IN_PROGRESS        [built]
-             ->  ENDED              [not built; no constant exists]
+NOT_STARTED  ->  IN_PROGRESS  ->  ENDED   [all built; ENDED is terminal]
 ```
 
-`RunState` deliberately declares **only two constants**. An `ENDED` constant
-"ready for later" would invite branching on a state nothing can produce.
+`ENDED` was deliberately absent until something could produce it, and arrived in
+the same session as the two conditions that reach it.
 
 - **`NOT_STARTED`** — the loop does not advance entropy and cannot trigger picks.
 - **`IN_PROGRESS`** — the loop runs as it always has.
+- **`ENDED`** — the loop stops. **Nothing else stops.** Terminal: nothing
+  transitions out, and `endRun` is idempotent so the first outcome stands.
 
 Persisted **by name** in `EntropyManager`'s existing codec, same `optionalFieldOf`
 discipline as every other field.
@@ -241,8 +244,11 @@ stays at 0 across 4100 gated ticks.
 because `/entropyforcepick` bypasses **the clock and nothing else** — it must not
 reach a state a real interval firing could not.
 
-**`gameOver` is NOT this and was left alone.** That flag is the older
-entropy-cap stop. Folding the two together belongs with the unbuilt `ENDED` work.
+**`gameOver` is GONE.** It was the older entropy-cap stop, carried alongside
+this enum for several sessions as a second, unreconciled notion of "the run is
+over". `RunState.ENDED` replaced it. The persisted `game_over` key is still
+*read* once to migrate old saves and is never written true — see CLAUDE.md, and
+note that dropping the read entirely would revive every finished run as live.
 
 #### Loading a save written before run states existed
 `run_state` is the one codec field that is `optionalFieldOf` **without** a
@@ -314,15 +320,23 @@ state, and the snapshot is write-once per player.
 
 | # | Trigger | Outcome | Build status |
 |---|---|---|---|
-| 1 | Entropy reaches the configured cap | **Loss** | partially exists — `gameOver` today |
-| 2 | Ender Dragon defeated | **Win** | **not built at all** |
-| 3 | Death while Become Hardcore is held | **Loss** | effect not built |
+| 1 | Entropy reaches the configured cap | `LOSS_ENTROPY_CAP` | **BUILT** |
+| 2 | Ender Dragon defeated (first kill) | `WIN_DRAGON` | **BUILT** |
+| 3 | Death while Become Hardcore is held | *no constant yet* | **NOT BUILT** |
 
-**Path 2 is the first real implementation of dragon-death detection.** It has only
-ever been Open Question 1 — there is no listener anywhere in the codebase today.
-Q1's sub-question is still live and must be answered when this is built: whether a
-re-fight of a resurrected dragon can re-trigger a win, or only the first kill
-counts.
+All three go through **one** entry point, `EntropyManager.endRun(server,
+outcome)` — idempotent, persists the outcome, stops the loop, voids any pending
+pick and pushes the end screen. Paths 1 and 2 call it today.
+
+**Q1's sub-question is answered, and by vanilla rather than by us.** Only the
+first kill counts, read off `EnderDragonFight.hasPreviouslyKilledDragon()` — the
+flag vanilla itself uses to gate the dragon egg. The timing works because
+`die()` (and therefore the Fabric death event) fires ~200 ticks *before*
+`setDragonKilled` sets that flag. Full derivation in CLAUDE.md.
+
+**Path 3 needs no architecture change**, and that is asserted rather than
+assumed: one `RunOutcome` constant plus one `endRun` call from the death listener
+**that already exists** for the death counter.
 
 **Path 3 revises Become Hardcore, and this is the significant change.**
 
@@ -351,9 +365,9 @@ Part 1. Everything it records about where the flag lives, that it is read live i
 death actually consists of is still accurate. It is simply **not the approach
 this effect will use.** Do not treat that section as the implementation plan.
 
-### The end screen
+### The end screen — BUILT
 
-Shown on transition to `ENDED`. Displays:
+`EndScreen`, pushed by `RunEndPayload` on the transition to `ENDED`. Displays:
 
 - **Win or loss, and which of the three conditions triggered it** — the three are
   distinguishable and the screen must say which fired, not just "you lost".
@@ -362,11 +376,15 @@ Shown on transition to `ENDED`. Displays:
   **No new tracking is needed here**; the count is the history's length.
 - **The full pick history** — also already persisted, and this finally gives it a
   real screen instead of the `/entropyhistory` chat dump.
-- **Total death count across the whole run** — **NEW.** Incremented on every
-  player death regardless of cause. **This does not exist anywhere in the codebase
-  today** and needs a new counter, persisted alongside the rest of the run state.
-  Note it counts *all* deaths, not only a Become Hardcore death, so it is
-  independent of path 3.
+- **Total death count across the whole run** — **BUILT.** Incremented on every
+  player death regardless of cause, from the same `AFTER_DEATH` listener the
+  dragon win uses. Counts *all* deaths, so it is independent of path 3 — and it
+  is gated on nothing: a death before Start or after the run ends still counts.
+
+**It is the one dismissible modal in this mod**, and that follows directly from
+the no-lock decision below: refusing Escape here *would be* the lock. Dismissing
+closes it and does nothing else. Shown once, with no client-tick re-open guard —
+unlike `StartScreen`, whose guard is exactly what makes that screen inescapable.
 
 ### Post-end world state
 
@@ -376,16 +394,26 @@ Acknowledged as having little practical purpose given the mod's fast-paced desig
 intent — but enforcement logic was explicitly judged not worth building. Recorded
 so a later session does not add it as an "obvious missing piece".
 
-### Noted for a future session — NOT decided
+### Per-tick gating on ENDED — DECIDED: the loop only
 
-Once `ENDED` genuinely exists as a state, **every per-tick system in the mod
-should probably check "is the run still `IN_PROGRESS`" before doing anything**:
-the entropy loop, `GreenThumbGrowth`'s growth ticks, `BlightTouchedTrample`'s
-per-player trample check, and any future per-tick effect.
+This was flagged as "likely required, not a firm decision". **Decided: only
+`EntropyManager.tick` checks the run state.** The eight per-tick effect services
+do not, and the harness asserts that absence per service.
 
-This is **flagged as a likely requirement, not a firm decision**, and is
-**explicitly out of scope** for whichever session implements the architecture
-above — unless it is raised again first.
+**Every one of them could gate cleanly** — each already calls
+`EntropyManager.get(server)` — so this is a decision, not a limitation. The
+argument against gating them:
+
+> Attribute effects and mixin/hook effects **cannot** be gated the same way.
+> Modifiers are already on the player and nothing removes them on end; every
+> `EffectHooks` reader keys off `AcquiredEffects`. Gating only the tick-driven
+> subset would leave Green Thumb's crops frozen while Glutton still starves you
+> and Nightmares still detonates beds — permanent effects half-working, with no
+> rule a player could infer.
+
+Making it consistent the other way means deactivating the whole acquired set on
+end, which contradicts both "effects are permanent" and the no-lock decision
+below. **The run stops; the effects you earned stay yours.**
 
 ### What this does to Open Questions 1 and 12
 
@@ -397,22 +425,28 @@ architecture above is actually built.
 
 ## Part 3: Open Questions — need your call before the next build session
 
-### 1. Win detection — DESIGN DECIDED, IMPLEMENTATION PENDING
-**Not resolved.** The *framing* is settled by "Run Lifecycle" above — dragon death is path 2 of three into the `ENDED` state, and is
-a win. But **nothing is built**: there is still no dragon-death listener anywhere
-in the codebase, and this stays open until there is. Sub-question (c) below is
-also still genuinely open and must be answered when it is built.
+### 1. Win detection — RESOLVED and BUILT
+**(a), plus (c) answered by vanilla.**
 
-Right now there's no code path that checks for Ender Dragon death at all.
-Options:
-- (a) Listen for the vanilla dragon-death event server-side, and when it
-  fires, stop the entropy timer and declare a win (regardless of current
-  entropy value)
-- (b) Same as (a), but also record *how much entropy was left* as a score,
-  so replays can be compared
-- (c) Something else — e.g. does re-entering the End count, or does it need
-  to be the *first* dragon kill specifically (re-fights of the resurrected
-  dragon shouldn't re-trigger a win)?
+`ServerLivingEntityEvents.AFTER_DEATH` + `instanceof EnderDragon` →
+`endRun(WIN_DRAGON)`, regardless of current entropy. See `RunEndDetector` and
+CLAUDE.md for the derivation; the three things worth carrying forward:
+
+- **The Fabric event, not a mixin, and that is load-bearing.**
+  `ServerPlayer.die` never calls `super.die`, so a hand-rolled
+  `LivingEntity.die` inject would have counted zero player deaths while applying
+  perfectly. Fabric fires the event from both `LivingEntity.die` and
+  `ServerPlayer.die`.
+- **(c) is "first kill only", and vanilla already tracks it.**
+  `EnderDragonFight.hasPreviouslyKilledDragon()` is public and persisted — the
+  same flag that gates the dragon egg. **No parallel tracking.** It reads
+  pre-kill at event time because `setDragonKilled` runs ~200 ticks later, at the
+  end of the death animation.
+- **(b) was not built.** Entropy-at-win is on the end screen, but nothing scores
+  or compares runs. Still open as a nice-to-have, not as a blocker.
+
+**Known gap:** `/kill` on a dragon bypasses `die()` and fires nothing;
+`/entropyforcewin` exists for testing.
 
 ### 2. Is this strictly singleplayer, or does it need to support multiplayer?
 This changes several things: whether entropy/picks are global or per-player,
@@ -570,13 +604,21 @@ severities, and merging them is what produced the problem this section exists to
 record. The anti-stacking category question (both would be `TOOL`/`GEAR`) is part
 of the design decision.
 
-### 12. Does dying under Become Hardcore end the entropy run? — DESIGN DECIDED, IMPLEMENTATION PENDING
-**Not resolved.** The answer is now option (a) below, arrived at from a different
-direction than this question anticipated: see "Run Lifecycle" above. Death while Become Hardcore is held ends the run as a loss —
-**but via mod-tracked state, not via vanilla hardcore at all.** Vanilla death and
-respawn proceed completely normally, so the "dead spectator" scenario this
-question was framed around no longer arises. **Nothing is built**, so this stays
-open.
+### 12. Does dying under Become Hardcore end the entropy run? — DESIGN DECIDED, EFFECT PENDING
+**The mechanism is now built; only the effect is not.** The answer is option (a):
+death while Become Hardcore is held ends the run as a loss — **via mod-tracked
+state, not via vanilla hardcore at all.** Vanilla death and respawn proceed
+normally, so the "dead spectator" scenario this question was framed around cannot
+arise.
+
+**The two end states now DO know about each other**, which is what this question
+was really about: there is one `ENDED` state, one `endRun`, and one outcome enum.
+The half that made this question hard — `gameOver` and `RunState` never having
+been reconciled — is resolved.
+
+What remains is the effect itself: one `RunOutcome` constant
+(`LOSS_HARDCORE_DEATH`) and one `endRun` call from the `AFTER_DEATH` listener
+that already exists. Deliberately not added ahead of the effect.
 
 The framing below predates that decision and assumes the real-hardcore approach;
 it is kept because its analysis of the two end states not knowing about each other

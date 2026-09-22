@@ -4,6 +4,7 @@ import com.entropymod.command.EntropyCommands;
 import com.entropymod.entropy.EffectBehaviors;
 import com.entropymod.entropy.EntropyAttributes;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.end.RunEndDetector;
 import com.entropymod.entropy.loot.GraveRobberDrops;
 import com.entropymod.entropy.growth.BlightTouchedTrample;
 import com.entropymod.entropy.growth.DangerSenseGlow;
@@ -21,6 +22,7 @@ import com.entropymod.network.HistoryResponsePayload;
 import com.entropymod.network.KeybindSnapshotPayload;
 import com.entropymod.network.OpenChoicePayload;
 import com.entropymod.network.RerollRequestPayload;
+import com.entropymod.network.RunEndPayload;
 import com.entropymod.network.RunSyncPayload;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityLevelChangeEvents;
@@ -69,6 +71,10 @@ public class EntropyMod implements ModInitializer {
 		// Run lifecycle: the state gate and the per-player keybind snapshot that
 		// Randomized Movement Controls is anchored to.
 		PayloadTypeRegistry.clientboundPlay().register(RunSyncPayload.TYPE, RunSyncPayload.CODEC);
+		// The end screen's data. Everything on it is server state the client has no
+		// other way to know -- entropy is only synced when a pick opens, and the
+		// death count is never synced at all. See RunEndPayload.
+		PayloadTypeRegistry.clientboundPlay().register(RunEndPayload.TYPE, RunEndPayload.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(KeybindSnapshotPayload.TYPE, KeybindSnapshotPayload.CODEC);
 
 		// Effect ids are matched between EffectRegistry and EffectBehaviors by string,
@@ -158,6 +164,13 @@ public class EntropyMod implements ModInitializer {
 		// the death path -- the bonus is an independent second roll of the mob's
 		// own loot table. Returns before touching the entity when nobody holds it.
 		ServerLivingEntityEvents.AFTER_DEATH.register(GraveRobberDrops::onDeath);
+
+		// The two death-driven run endings: the Ender Dragon win, and the run-wide
+		// death counter. Same event as Grave Robber above, and deliberately the
+		// EVENT rather than a mixin -- ServerPlayer.die never calls super.die, so a
+		// hand-rolled LivingEntity.die inject would have counted zero player deaths
+		// while applying perfectly. Fabric fires this from both. See RunEndDetector.
+		ServerLivingEntityEvents.AFTER_DEATH.register(RunEndDetector::onDeath);
 
 		ServerPlayerEvents.JOIN.register(EntropyMod::reapplyTo);
 
