@@ -33,6 +33,26 @@ Most new effects should extend `AttributeEffectBehavior` and be ~10 lines. If a
 new effect makes you edit a fourth file, that's a signal the abstraction is
 missing something; fix the abstraction rather than the caller.
 
+**Two optional hooks on `EffectBehavior` exist for effects whose content is a
+change to the PICK LOOP rather than to the player.** Both default to doing
+nothing, so every effect written before them is unaffected and the three-things
+rule still holds:
+
+- `expandGrant(offeredIds, chosenId)` — "one card was clicked; which effects does
+  this pick grant?" Called before anything is acquired, so no-repeat,
+  anti-stacking, history and `apply` all then run uniformly over a list. Twin
+  Fate is the only user. **The pick still costs exactly 1 entropy and 1 pick.**
+- `onAcquired(EntropyManager)` — "this effect just joined the run; arm whatever it
+  arms." **Not `apply`**, and the distinction is load-bearing: `apply` runs again
+  on every respawn, and "bank two reroll charges" is not idempotent. This runs
+  exactly once per effect per run, from `onChoiceMade` **and** `/entropygrant`.
+
+They are deliberately not a central switch on effect id in `EntropyManager` —
+that would be the fourth-file edit this section warns about. See the
+`entropy-effects` skill, "The Tier 2 META batch", for the full architecture,
+including why `EffectRegistry.SCALABLE_SEVERITY_IDS` is only eight effects and
+why a design built on "pick it again" cannot work under no-repeat.
+
 - `EffectBehavior` — `apply(EffectContext)` / `remove(EffectContext)`. Per
   Open Question 9 this is option (b), one class per effect, not a big switch.
 - `EffectContext` — wraps the server, the `EffectDefinition`, **a specific

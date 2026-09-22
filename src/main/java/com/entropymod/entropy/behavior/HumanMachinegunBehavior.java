@@ -7,8 +7,8 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import java.util.List;
 
 /**
- * Human Machinegun (BAD / COMBAT, entropy 25-50) -- swing 90% faster, hit for a
- * quarter as much.
+ * Human Machinegun (BAD / COMBAT, entropy 25-50) -- swing 90% faster, hit for two
+ * fifths as much.
  *
  * <h2>The operation choice is about STACKING, not about a single modifier</h2>
  *
@@ -57,38 +57,51 @@ import java.util.List;
  * {@code -2.4} speed, netting 6.0 and 1.6.
  *
  * <table border="1">
- *   <caption>exact resulting values ({@code TOTAL} factors 1.90 and 0.25)</caption>
+ *   <caption>exact resulting values ({@code TOTAL} factors 1.90 and 0.40)</caption>
  *   <tr><th></th><th>speed, normal</th><th>speed, cursed</th>
  *       <th>cooldown</th><th>damage, normal</th><th>damage, cursed</th>
  *       <th>DPS, normal</th><th>DPS, cursed</th></tr>
- *   <tr><td>bare hand</td><td>4.00/s</td><td><b>7.60/s</b></td><td>20 -&gt; 2.63 ticks</td>
- *       <td>1.0</td><td><b>0.25</b></td><td>4.00</td><td><b>1.90</b></td></tr>
- *   <tr><td>iron sword</td><td>1.60/s</td><td><b>3.04/s</b></td><td>12.5 -&gt; 6.58 ticks</td>
- *       <td>6.0</td><td><b>1.50</b></td><td>9.60</td><td><b>4.56</b></td></tr>
- *   <tr><td>netherite axe</td><td>1.00/s</td><td><b>1.90/s</b></td><td>20 -&gt; 10.53 ticks</td>
- *       <td>10.0</td><td><b>2.50</b></td><td>10.00</td><td><b>4.75</b></td></tr>
+ *   <tr><td>bare hand</td><td>4.00/s</td><td><b>7.60/s</b></td><td>5.00 -&gt; 2.63 ticks</td>
+ *       <td>1.0</td><td><b>0.40</b></td><td>4.00</td><td><b>3.04</b></td></tr>
+ *   <tr><td>iron sword</td><td>1.60/s</td><td><b>3.04/s</b></td><td>12.50 -&gt; 6.58 ticks</td>
+ *       <td>6.0</td><td><b>2.40</b></td><td>9.60</td><td><b>7.30</b></td></tr>
+ *   <tr><td>netherite axe</td><td>1.00/s</td><td><b>1.90/s</b></td><td>20.00 -&gt; 10.53 ticks</td>
+ *       <td>10.0</td><td><b>4.00</b></td><td>10.00</td><td><b>7.60</b></td></tr>
  * </table>
  *
- * <p>Every row lands on exactly the stated percentages -- speed x1.90, damage x0.25
+ * <p>Every row lands on exactly the stated percentages -- speed x1.90, damage x0.40
  * -- because {@code TOTAL} is a product and is therefore independent of whatever
- * else is in the pool. <b>Net DPS is x0.475 uniformly</b> ({@code 1.90 * 0.25}), and
- * that number is what settles the phase: an effect that more than halves damage
- * output is a curse, so it is registered <b>BAD</b> despite the attack-speed half
- * reading as a buff.
+ * else is in the pool. <b>Net DPS is x0.76 uniformly</b> ({@code 1.90 * 0.40}), and
+ * that number is what settles the phase: an effect that costs a quarter of a
+ * player's damage output is a curse, so it stays <b>BAD</b> despite the
+ * attack-speed half reading as a buff.
+ *
+ * <p><b>Retuned from -0.75 (x0.25 damage, x0.475 DPS) to -0.60.</b> Note the
+ * retune is far larger than the input percentage suggests: the damage factor rose
+ * by 60% of itself, so the net DPS penalty went from <em>-52.5%</em> to
+ * <em>-24%</em>. It is now the mildest damage curse in the registry, and the
+ * bare-handed case in particular (0.40 against Weak Grip's clamped 0.0) is close to
+ * the perceptual floor this project has been burned by. The lever if it reads as
+ * doing nothing is {@link #ATTACK_DAMAGE_PENALTY} alone; the speed half is
+ * untouched and the two are independent factors in the same product.
  *
  * <h2>Both clamps checked, neither reachable</h2>
  *
  * <p>{@code ATTACK_SPEED} floors at <b>0.0</b> and 0 would be unrecoverable (the
  * cooldown could never refill) -- this effect only ever raises it. {@code ATTACK_DAMAGE}
  * floors at <b>0.0</b>, and {@code TOTAL} at any amount greater than -1 can never
- * reach zero however many stack, so the bare-handed 0.25 is a genuine (if derisory)
+ * reach zero however many stack, so the bare-handed 0.40 is a genuine (if derisory)
  * number rather than a clamp. Composed with Weak Grip's {@code -2.0 ADD_VALUE} the
  * bare-handed total is already 0 before this applies, which is that effect's own
  * documented outcome and not a new one.
  *
  * <p>Held with Glass Cannon Pact (+0.50 {@code ADD_MULTIPLIED_BASE}) an iron sword
- * is {@code (6.0 + 0.5) * 0.25 = 1.625} -- the two compose in different passes and
- * neither clobbers the other, since every modifier carries its own {@code Identifier}.
+ * is {@code (1.0 + 5.0) * 1.5 * 0.40 = 3.60} -- the two compose in different passes
+ * and neither clobbers the other, since every modifier carries its own
+ * {@code Identifier}. Note the {@code BASE} term is <b>+50% of the weapon-inclusive
+ * total</b>, not a flat +0.5: see the {@code calculateValue} listing at the top of
+ * this file, and {@code entropy-effects} finding 1bb, which corrects an earlier
+ * reading of this exact composition.
  *
  * <p><b>{@code ATTACK_DAMAGE} is not client-syncable</b>, so the item tooltip will
  * not show the reduction; {@code ATTACK_SPEED} is, so the cooldown sweep on the
@@ -102,8 +115,8 @@ public final class HumanMachinegunBehavior extends AttributeEffectBehavior {
 	/** +90% attack speed. {@code ADD_MULTIPLIED_TOTAL}, so the factor is x1.90. */
 	public static final double ATTACK_SPEED_BONUS = 0.90;
 
-	/** Damage down to 25% of normal. {@code ADD_MULTIPLIED_TOTAL}, so x0.25. */
-	public static final double ATTACK_DAMAGE_PENALTY = -0.75;
+	/** Damage down to 40% of normal. {@code ADD_MULTIPLIED_TOTAL}, so x0.40. */
+	public static final double ATTACK_DAMAGE_PENALTY = -0.60;
 
 	public HumanMachinegunBehavior() {
 		super(List.of(

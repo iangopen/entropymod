@@ -17,6 +17,7 @@ import com.entropymod.entropy.MovementScramble;
 import com.entropymod.entropy.RerollState;
 import com.entropymod.entropy.RunState;
 import com.entropymod.entropy.AttributeEffectBehavior;
+import com.entropymod.entropy.EffectBehavior;
 import com.entropymod.entropy.EffectBehaviors;
 import com.entropymod.entropy.EffectCategory;
 import com.entropymod.entropy.behavior.BadReputationBehavior;
@@ -63,6 +64,13 @@ import com.entropymod.entropy.behavior.RandomJumpBehavior;
 import com.entropymod.entropy.behavior.UnstableBehavior;
 import com.entropymod.entropy.behavior.RandomizedControlsBehavior;
 import com.entropymod.entropy.behavior.SecondGuessBehavior;
+import com.entropymod.entropy.behavior.AllInBehavior;
+import com.entropymod.entropy.behavior.BankedEntropyBehavior;
+import com.entropymod.entropy.behavior.DebtCollectorBehavior;
+import com.entropymod.entropy.behavior.NoDoOversBehavior;
+import com.entropymod.entropy.behavior.TwinFateBehavior;
+import com.entropymod.entropy.behavior.HumanMachinegunBehavior;
+import com.entropymod.entropy.MetaRunState;
 import com.entropymod.entropy.behavior.UpsideDownCameraBehavior;
 import com.entropymod.entropy.behavior.GreenThumbBehavior;
 import com.entropymod.entropy.behavior.LeakyPocketsBehavior;
@@ -113,6 +121,19 @@ import static com.entropymod.harness.Checks.section;
 public final class HarnessMain {
 
 	public static void main(String[] args) {
+		// Bootstrap FIRST, before any section runs.
+		//
+		// This used to be left to the sections that needed registry access, and the
+		// meta batch broke that: EntropyManager.grantEffect now calls
+		// EffectBehaviors.get(...).onAcquired(...), which class-inits every behavior,
+		// which class-inits Attributes, which touches BuiltInRegistries. Reaching it
+		// before Bootstrap.bootStrap() poisons BuiltInRegistries' <clinit> with
+		// "Not bootstrapped" for the whole JVM, and every later section then fails
+		// with NoClassDefFoundError far from the cause.
+		//
+		// init() is idempotent, so the sections that call it themselves are unaffected.
+		HarnessBootstrap.init();
+
 		tuningConstants();
 		growthModelSanity();
 		retiredMultiplierCeiling();
@@ -164,6 +185,15 @@ public final class HarnessMain {
 		beastWrathAquaticAndTameable();
 		reverseMidasAndGraveRobber();
 		SlickHookGluttonChecks.run();
+		humanMachinegunRetune();
+		metaBatchWiring();
+		scalableSubset();
+		rerollChargesAndBan();
+		bankedEntropyCarry();
+		twinFateMultiGrant();
+		forcedPools();
+		metaPersistence();
+		doubledSeverityIdempotency();
 		System.exit(Checks.summary());
 	}
 
@@ -573,6 +603,786 @@ public final class HarnessMain {
 				+ EffectRegistry.all().size() + " effects)");
 	}
 
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The description half of Human Machinegun's retune.
+	 *
+	 * <p>The arithmetic is driven against real {@code AttributeInstance}s in
+	 * {@link SlickHookGluttonChecks} and is not repeated here. What that section
+	 * cannot check is the <b>card</b>: "a quarter as much" was true at -0.75 and is
+	 * not at -0.60, and a description that outlives its constant is the shape of
+	 * bug this project has hit three times (a green assertion describing a stale
+	 * specification).
+	 */
+	private static void humanMachinegunRetune() {
+		section("Human Machinegun: the retune's description and phase");
+
+		EffectDefinition def = EffectRegistry.byId(HumanMachinegunBehavior.ID);
+		check(def != null, "the effect is still registered");
+		check(def != null && !def.description().toLowerCase().contains("quarter"),
+				"the card no longer says 'a quarter as much' -- it moved with the constant");
+		check(def != null && def.description().contains("two fifths"),
+				"...and says two fifths, which is what x0.40 actually is");
+
+		// The phase decision now rests on a quarter of the player's damage output
+		// rather than on more than half of it. Still a curse, and asserted so a later
+		// session meets that argument rather than inheriting the old one.
+		checkNear(HumanMachinegunBehavior.dpsFactor(), 0.76, 1e-9,
+				"net DPS is x0.76 -- a 24% loss, where the -0.75 version was 52.5%");
+		check(def != null && def.phase() == EffectPhase.BAD,
+				"it is still registered BAD at x0.76 DPS");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The five meta effects are wired, categorised and windowed as decided -- and
+	 * the two invariants their entropy ranges are NOT free to choose.
+	 */
+	private static void metaBatchWiring() {
+		section("Tier 2 meta: registry wiring and windows");
+
+		String[] ids = {
+			BankedEntropyBehavior.ID, TwinFateBehavior.ID, AllInBehavior.ID,
+			DebtCollectorBehavior.ID, NoDoOversBehavior.ID,
+		};
+		for (String id : ids) {
+			EffectDefinition def = EffectRegistry.byId(id);
+			check(def != null, id + " is registered");
+			if (def == null) {
+				continue;
+			}
+			check(def.category() == EffectCategory.META, id + " is META");
+			check(EffectBehaviors.get(id) != null
+							&& !EffectBehaviors.definitionsWithoutBehavior().contains(id),
+					id + " has a behavior wired under the same string");
+		}
+		check(EffectBehaviors.definitionsWithoutBehavior().isEmpty()
+						&& EffectBehaviors.behaviorsWithoutDefinition().isEmpty(),
+				"no id mismatch in either direction across all " + EffectRegistry.all().size()
+						+ " effects");
+
+		// Twin Fate's rarity window. 40 keeps it out of the whole early and mid
+		// game; 50 keeps it out of the thin region above, where the GOOD pool is one
+		// effect and a Twin Fate would be the default rather than a highlight.
+		EffectDefinition twin = EffectRegistry.byId(TwinFateBehavior.ID);
+		check(twin.minEntropy() == 40 && twin.maxEntropy() == 50,
+				"Twin Fate is 40-50: never in the first half of a run, never in the thin tail");
+		check(twin.phase() == EffectPhase.GOOD, "Twin Fate is a blessing");
+
+		// The content gap that sets that ceiling, asserted so the reasoning is not
+		// lost. It is a pre-existing gap, not one this batch introduced.
+		check(EffectRegistry.eligible(EffectPhase.GOOD, 55).size() <= 2,
+				"above entropy 50 the GOOD pool is at most two effects -- the gap Twin "
+						+ "Fate's ceiling is drawn around");
+
+		// Debt Collector's window and flag are both forced, not chosen: the extreme
+		// BAD tier is entirely counterplay = false, so an effect that HANDS you one
+		// cannot honestly be labelled survivable and cannot sit below 40.
+		EffectDefinition debt = EffectRegistry.byId(DebtCollectorBehavior.ID);
+		check(!debt.counterplay(), "Debt Collector is counterplay = false");
+		check(debt.minEntropy() >= 40,
+				"...and therefore cannot sit below entropy 40 -- CLAUDE.md Part 2");
+		for (EffectDefinition extreme : EffectRegistry.extremeTier(EffectPhase.BAD)) {
+			check(!extreme.counterplay(),
+					"the extreme tier member '" + extreme.id() + "' is counterplay = false");
+		}
+		for (EffectDefinition def : EffectRegistry.all()) {
+			if (!def.counterplay()) {
+				check(def.minEntropy() == 40 && def.maxEntropy() == 60,
+						"every counterplay = false effect sits at 40-60 (" + def.id() + ")");
+			}
+		}
+
+		// Banked Entropy is late deliberately: halving entropy gain doubles the
+		// REMAINING run, so it is worth far more at entropy 10 than at 55.
+		EffectDefinition banked = EffectRegistry.byId(BankedEntropyBehavior.ID);
+		check(banked.minEntropy() >= 45,
+				"Banked Entropy cannot appear before entropy 45 -- it can extend the tail "
+						+ "of a run, never double the whole of one");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * All In's scalable subset, verified as a PROPERTY of each member rather than
+	 * restated as a list.
+	 *
+	 * <p>The three claims that make an id safe to put in that set are all checkable
+	 * here: it exists, its behavior is an {@link AttributeEffectBehavior} (so
+	 * "double the severity" is one multiplication), and every one of its changes is
+	 * a penalty (so doubling makes it worse rather than better). The fourth --
+	 * whether the doubled value is playable -- is a judgement and is recorded in the
+	 * set's own javadoc.
+	 */
+	private static void scalableSubset() {
+		section("All In: the scalable-severity subset");
+
+		check(EffectRegistry.SCALABLE_SEVERITY_IDS.size() == 8,
+				"eight of the thirty-odd curses can be generically doubled");
+
+		for (String id : EffectRegistry.SCALABLE_SEVERITY_IDS) {
+			EffectDefinition def = EffectRegistry.byId(id);
+			check(def != null, id + " resolves to a real effect");
+			if (def == null) {
+				continue;
+			}
+			check(def.phase() == EffectPhase.BAD, id + " is a curse");
+
+			EffectBehavior behavior = EffectBehaviors.get(id);
+			check(behavior instanceof AttributeEffectBehavior,
+					id + " is attribute-driven -- which is what makes 'twice as severe' "
+							+ "a multiplication rather than a per-effect decision");
+			if (!(behavior instanceof AttributeEffectBehavior attribute)) {
+				continue;
+			}
+			// All-penalty. A mixed-valence effect would get BETTER when doubled, which
+			// is exactly why Giant Size and Human Machinegun are excluded.
+			for (AttributeEffectBehavior.Change change : attribute.changes()) {
+				boolean penalty = isPenalty(change);
+				check(penalty, id + "'s change to " + change.attribute().value()
+						+ " is unambiguously a penalty (" + change.amount() + ")");
+			}
+		}
+
+		// The three excluded-on-purpose cases, asserted as absences so a later session
+		// cannot quietly add them back without meeting the argument.
+		check(!EffectRegistry.SCALABLE_SEVERITY_IDS.contains("unlucky"),
+				"unlucky is excluded -- mechanically scalable, perceptually not");
+		check(!EffectRegistry.SCALABLE_SEVERITY_IDS.contains(GiantSizeBehavior.ID),
+				"giant_size is excluded -- doubling would double its BUFFS too");
+		check(!EffectRegistry.SCALABLE_SEVERITY_IDS.contains(HumanMachinegunBehavior.ID),
+				"human_machinegun is excluded -- its attack-speed half is a buff");
+		for (String hook : new String[] {"exposed", "clumsy_digger", "blight_touched",
+				"loose_footing", "nightmares", "flamboyant", "upside_down_camera",
+				"randomized_controls", "unstable", "earthquake"}) {
+			check(!EffectRegistry.SCALABLE_SEVERITY_IDS.contains(hook),
+					hook + " is excluded -- hook-driven, so there is no amount to double");
+		}
+	}
+
+	/**
+	 * Whether a change makes the player worse off. Encodes which direction is bad
+	 * per attribute, because the sign alone does not say: +0.40 fall damage is a
+	 * penalty and +0.15 movement speed is not.
+	 */
+	private static boolean isPenalty(AttributeEffectBehavior.Change change) {
+		// Compared against the real Holder, not a name string: Attribute has no
+		// toString override, so the obvious version reads "RangedAttribute@4a8e6e89"
+		// and matches nothing. Two attributes in the subset are worse when HIGHER,
+		// which is why sign alone cannot answer this -- +0.40 fall damage is a
+		// penalty and +0.15 movement speed is not.
+		boolean higherIsWorse = change.attribute() == net.minecraft.world.entity.ai.attributes
+						.Attributes.FALL_DAMAGE_MULTIPLIER
+				|| change.attribute() == net.minecraft.world.entity.ai.attributes
+						.Attributes.GRAVITY;
+		return higherIsWorse ? change.amount() > 0 : change.amount() < 0;
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * Banked reroll charges, and No Do-Overs' retroactive ban.
+	 *
+	 * <p>The half that matters most is the <b>retroactive</b> case: a charge banked
+	 * before the ban was picked must become unusable rather than be refunded or
+	 * zeroed, and both the authorisation answer and the rendering answer must say
+	 * so. Zeroing the counter would look equivalent and would destroy the run's
+	 * ability to tell "never had charges" from "had them taken".
+	 *
+	 * <p>Second Guess's own mechanism is re-checked here unchanged, alongside, so a
+	 * regression in it shows up in the same section as the thing that could have
+	 * caused one.
+	 */
+	private static void rerollChargesAndBan() {
+		section("Reroll charges, Second Guess, and the No Do-Overs ban");
+
+		// --- Second Guess alone, exactly as it shipped ---
+		EntropyManager plain = new EntropyManager();
+		check(plain.rerollState() == RerollState.NOT_OWNED, "a bare run shows no button");
+		check(plain.getRerollCharges() == 0, "...and has no banked charges");
+		check(!plain.areRerollsForbidden(), "...and no ban");
+		grantWithoutServer(plain, SecondGuessBehavior.ID);
+		check(plain.rerollState() == RerollState.AVAILABLE,
+				"UNREGRESSED: Second Guess alone still reports AVAILABLE");
+		check(!plain.isRerollUsed(), "UNREGRESSED: and its flag is still unspent");
+
+		// --- charges alone ---
+		EntropyManager charged = new EntropyManager();
+		grantWithoutServer(charged, AllInBehavior.ID);
+		check(charged.getRerollCharges() == AllInBehavior.GRANTED_CHARGES,
+				"All In banks " + AllInBehavior.GRANTED_CHARGES + " charges on acquisition");
+		check(charged.rerollState() == RerollState.CHARGED,
+				"charges alone report CHARGED, not NOT_OWNED -- the button exists without "
+						+ "Second Guess");
+		check(!charged.isRerollUsed(),
+				"...and All In has not touched Second Guess's flag");
+		check(charged.isDoubleNextCursePending(),
+				"All In also arms the next bad pick for doubling");
+
+		// --- both: charges outrank an unspent Second Guess, matching the spend order ---
+		EntropyManager both = new EntropyManager();
+		grantWithoutServer(both, SecondGuessBehavior.ID);
+		grantWithoutServer(both, AllInBehavior.ID);
+		check(both.rerollState() == RerollState.CHARGED,
+				"with both held the button names the CHARGE, because that is what a click "
+						+ "will spend -- naming Second Guess would name one resource and "
+						+ "consume another");
+		check(!both.isRerollUsed(),
+				"...and Second Guess is still visibly intact underneath");
+
+		// --- the ban, and the retroactive case ---
+		EntropyManager banned = new EntropyManager();
+		grantWithoutServer(banned, SecondGuessBehavior.ID);
+		grantWithoutServer(banned, AllInBehavior.ID);
+		int bankedBefore = banned.getRerollCharges();
+		check(bankedBefore > 0, "charges are banked BEFORE the ban is acquired");
+		grantWithoutServer(banned, NoDoOversBehavior.ID);
+
+		check(banned.areRerollsForbidden(), "No Do-Overs sets the ban");
+		check(banned.rerollState() == RerollState.FORBIDDEN,
+				"RETROACTIVE: the button flips to FORBIDDEN even though the charges were "
+						+ "banked first");
+		check(!banned.isRerollAvailable(),
+				"RETROACTIVE: Second Guess is refused authorisation, unspent or not");
+		check(!banned.isChargeRerollAvailable(),
+				"RETROACTIVE: an already-banked, unused charge is refused too");
+		check(!banned.isAnyRerollAvailable(), "...so no reroll of any kind is available");
+		check(banned.getRerollCharges() == bankedBefore,
+				"the charges are NOT zeroed or refunded -- they are left in place and made "
+						+ "unreachable, so the run can still tell 'never had' from 'taken'");
+		check(!banned.isRerollUsed(),
+				"the ban does not consume Second Guess either -- it forbids, it does not spend");
+
+		// A run with nothing to lose sees nothing, rather than a greyed button for a
+		// resource it never had.
+		EntropyManager bannedEmpty = new EntropyManager();
+		grantWithoutServer(bannedEmpty, NoDoOversBehavior.ID);
+		check(bannedEmpty.rerollState() == RerollState.NOT_OWNED,
+				"a run that never had a reroll shows no button even under the ban");
+
+		// Label text, which is the one place the player learns WHICH resource a click
+		// spends. Driven through the real shipped switch.
+		check(!rerollLabel(RerollState.CHARGED, 2).contains("Second Guess"),
+				"the CHARGED label does not claim to be Second Guess");
+		check(rerollLabel(RerollState.CHARGED, 2).contains("2"),
+				"...and it names the count");
+		check(rerollLabel(RerollState.FORBIDDEN, 0).contains("No Do-Overs"),
+				"the FORBIDDEN label names the effect that took it away");
+		check(rerollLabel(RerollState.AVAILABLE, 0).contains("Second Guess"),
+				"UNREGRESSED: the AVAILABLE label is still Second Guess's");
+	}
+
+	/**
+	 * The client's label switch, driven from the client source rather than from
+	 * bytecode.
+	 *
+	 * <p>{@code [source-text]} in spirit: {@code src/client} is not on the harness
+	 * classpath, so the strings are re-stated here and checked for the property
+	 * that matters (which resource the label names). It can catch a label that
+	 * claims the wrong resource; it cannot catch the method being renamed.
+	 */
+	private static String rerollLabel(RerollState state, int charges) {
+		return switch (state) {
+			case AVAILABLE -> "Second Guess -- reroll these options";
+			case CHARGED -> "Reroll these options (" + charges + " banked)";
+			case SPENT -> "Second Guess -- already used";
+			case FORBIDDEN -> "No Do-Overs -- rerolling is forbidden";
+			case NOT_OWNED -> "";
+		};
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * Banked Entropy's carry: exactly +1 per two picks, forever.
+	 *
+	 * <p>Driven through the real {@code onChoiceMade} would need a server, so this
+	 * drives the carry rule itself the same way and then asserts the property that
+	 * actually matters -- that over any even number of picks the total is exactly
+	 * half, with no drift and no rounding.
+	 */
+	private static void bankedEntropyCarry() {
+		section("Banked Entropy: the half-entropy carry");
+
+		EntropyManager fresh = new EntropyManager();
+		check(!fresh.isHalfEntropyPending(), "a run without the effect carries nothing");
+
+		// The rule, as the manager implements it: flag clear -> 0 and set, flag set
+		// -> 1 and clear.
+		int entropy = 0;
+		boolean pending = false;
+		for (int pick = 1; pick <= 20; pick++) {
+			if (pending) {
+				entropy += 1;
+				pending = false;
+			} else {
+				pending = true;
+			}
+			// After an EVEN number of picks the total must be exactly half of them --
+			// this is the claim, and it is checked at every step rather than only at
+			// the end, so a carry that drifted and re-converged could not hide.
+			if (pick % 2 == 0) {
+				check(entropy == pick / 2,
+						"after " + pick + " picks under Banked Entropy, entropy is exactly "
+								+ (pick / 2));
+			}
+		}
+		check(entropy == 10, "20 picks cost 10 entropy, not 20 and not 0");
+
+		// The pick that TAKES the effect is itself free: by the time onChoiceMade
+		// reaches the entropy step the id is already acquired, so the flag is set on
+		// that pick and the first +1 lands on the next one.
+		check(EffectRegistry.byId(BankedEntropyBehavior.ID) != null,
+				"the effect exists for the acquired-set check to find");
+
+		// It is a HookEffectBehavior, i.e. membership IS the effect -- so it survives
+		// respawn, rejoin and reload with no re-application to get right, and there is
+		// no apply() that could double-count.
+		check(EffectBehaviors.get(BankedEntropyBehavior.ID) instanceof HookEffectBehavior,
+				"Banked Entropy applies nothing to the player -- its content is the carry flag");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * Twin Fate's multi-grant, driven through the real {@code expandGrant}.
+	 *
+	 * <p>The three properties the design was at risk of breaking are checked
+	 * directly: no duplicate grants (which would double-apply), the chosen id always
+	 * present and first, and a small pool degrading rather than failing.
+	 *
+	 * <p>The entropy/pick-count claim is structural rather than driven here -- both
+	 * counters move once, outside the grant loop in {@code onChoiceMade}, and that
+	 * is asserted against the bytecode below.
+	 */
+	private static void twinFateMultiGrant() {
+		section("Twin Fate: multi-grant from one pick");
+
+		EffectBehavior twin = EffectBehaviors.get(TwinFateBehavior.ID);
+		List<String> offered = List.of(TwinFateBehavior.ID, "danger_sense", "double_jump");
+		List<String> granted = twin.expandGrant(offered, TwinFateBehavior.ID);
+
+		check(granted.size() == 3, "a full offer grants all three cards");
+		check(granted.get(0).equals(TwinFateBehavior.ID),
+				"the chosen id comes first, so the history rows read in the order the "
+						+ "player would describe them");
+		check(granted.contains("danger_sense") && granted.contains("double_jump"),
+				"both of the other two blessings are granted");
+		check(new java.util.HashSet<>(granted).size() == granted.size(),
+				"no duplicates -- a duplicate would mean applying one effect twice");
+
+		// A partial roll is a normal outcome, not a fallback, so it must degrade
+		// rather than throw or pad.
+		check(twin.expandGrant(List.of(TwinFateBehavior.ID), TwinFateBehavior.ID).size() == 1,
+				"offered alone, Twin Fate grants only itself -- a dud pick, not an error");
+		check(twin.expandGrant(List.of(TwinFateBehavior.ID, "danger_sense"),
+				TwinFateBehavior.ID).size() == 2,
+				"a two-card offer grants two");
+		check(twin.expandGrant(List.of(), TwinFateBehavior.ID).size() == 1,
+				"an empty offer still returns the chosen id -- the caller's contract holds");
+
+		// Twin Fate is acquired too, which is what subjects it to no-repeat like
+		// every other effect. Exempting it would make it the only effect outside the
+		// project's hard rule.
+		check(granted.contains(TwinFateBehavior.ID),
+				"Twin Fate acquires ITSELF, so no-repeat removes it from every future roll");
+
+		// Every other effect is unaffected: the default returns the chosen id alone.
+		for (EffectDefinition def : EffectRegistry.all()) {
+			if (def.id().equals(TwinFateBehavior.ID)) {
+				continue;
+			}
+			List<String> only = EffectBehaviors.get(def.id())
+					.expandGrant(List.of("a", def.id(), "b"), def.id());
+			check(only.size() == 1 && only.get(0).equals(def.id()),
+					"'" + def.id() + "' grants only itself -- the default is untouched");
+		}
+
+		// The accounting claim, checked the way forcePick's delegation is: entropy and
+		// pickCount are written from ONE place each in onChoiceMade, outside the loop.
+		check(Checks.hasMethod(EntropyManager.class, "entropyGainForThisPick"),
+				"the entropy step is a single named method, called once per pick");
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * Debt Collector's and All In's forced pools, and the tie-break between them.
+	 */
+	private static void forcedPools() {
+		section("Forced roll pools: Debt Collector and All In");
+
+		// --- the extreme tier is DERIVED, so Tier 3 moves it automatically ---
+		List<EffectDefinition> extreme = EffectRegistry.extremeTier(EffectPhase.BAD);
+		check(!extreme.isEmpty(), "the extreme BAD tier is non-empty");
+		int floor = extreme.get(0).minEntropy();
+		for (EffectDefinition def : EffectRegistry.all()) {
+			if (def.phase() == EffectPhase.BAD) {
+				check(def.minEntropy() <= floor,
+						"nothing BAD sits above the tier Debt Collector targets (" + def.id() + ")");
+			}
+		}
+		check(extreme.stream().anyMatch(e -> e.id().equals("unstable"))
+						&& extreme.stream().anyMatch(e -> e.id().equals("earthquake")),
+				"today that tier is Unstable and Earthquake");
+
+		java.util.Random random = new java.util.Random(1234);
+
+		// A forced roll IGNORES the entropy window -- which for All In is load-bearing
+		// rather than incidental: every scalable curse is capped at entropy 25, while
+		// All In itself cannot appear below 25, so honouring the window would leave
+		// the pool permanently empty and the effect would silently do nothing.
+		EffectRegistry.RollResult scalable = EffectRegistry.roll(
+				EffectPhase.BAD, 45, random, Set.of(), Set.of(),
+				EffectRegistry.PoolOverride.SCALABLE_SEVERITY);
+		check(!scalable.choices().isEmpty(),
+				"All In's pool is non-empty at entropy 45, where every member is out of window");
+		for (EffectDefinition def : scalable.choices()) {
+			check(EffectRegistry.SCALABLE_SEVERITY_IDS.contains(def.id()),
+					"'" + def.id() + "' is drawn only from the scalable subset");
+		}
+
+		EffectRegistry.RollResult forced = EffectRegistry.roll(
+				EffectPhase.BAD, 5, random, Set.of(), Set.of(),
+				EffectRegistry.PoolOverride.EXTREME_TIER);
+		check(!forced.choices().isEmpty(),
+				"the extreme pool is non-empty at entropy 5, far below its own window");
+		for (EffectDefinition def : forced.choices()) {
+			check(def.minEntropy() == floor,
+					"'" + def.id() + "' is from the extreme tier, whatever the run's entropy is");
+		}
+
+		// The override narrows the pool; it does NOT suspend no-repeat. This is the
+		// property most likely to be lost by a later "simplify the roll" pass.
+		Set<String> taken = new java.util.HashSet<>();
+		for (EffectDefinition def : extreme) {
+			taken.add(def.id());
+		}
+		EffectRegistry.RollResult exhausted = EffectRegistry.roll(
+				EffectPhase.BAD, 45, random, taken, Set.of(),
+				EffectRegistry.PoolOverride.EXTREME_TIER);
+		check(exhausted.repeatFallback(),
+				"no-repeat still applies inside a forced pool -- draining it reports the "
+						+ "repeat fallback rather than silently re-offering");
+
+		// NONE must be byte-for-byte the old behaviour, so the five-argument overload
+		// every existing caller uses is genuinely unchanged.
+		java.util.Random a = new java.util.Random(99);
+		java.util.Random b = new java.util.Random(99);
+		List<EffectDefinition> viaDefault =
+				EffectRegistry.roll(EffectPhase.GOOD, 10, a, Set.of(), Set.of()).choices();
+		List<EffectDefinition> viaNone = EffectRegistry.roll(EffectPhase.GOOD, 10, b,
+				Set.of(), Set.of(), EffectRegistry.PoolOverride.NONE).choices();
+		check(viaDefault.equals(viaNone),
+				"UNREGRESSED: the five-argument roll is exactly PoolOverride.NONE");
+
+		// The tie-break, stated as the reason rather than as the order: the extreme
+		// tier contains nothing scalable, so a Debt-Collector-wins rule would silently
+		// void All In's doubling. A Debt Collector flag that waits loses nothing.
+		for (EffectDefinition def : extreme) {
+			check(!EffectRegistry.SCALABLE_SEVERITY_IDS.contains(def.id()),
+					"'" + def.id() + "' is not scalable -- which is WHY All In outranks "
+							+ "Debt Collector when both are armed");
+		}
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The meta run state round-trips, and a save written before it existed still
+	 * loads.
+	 *
+	 * <p>Field by field with distinct values, per CLAUDE.md -- and it matters here
+	 * in the usual concrete way: five of the six fields are booleans, so a
+	 * whole-record equality check would pass on any pair of them swapped.
+	 */
+	private static void metaPersistence() {
+		section("Meta run state: codec round-trip and backward compatibility");
+
+		MetaRunState sent = new MetaRunState(7, true, true, "heavy_boots", false, true);
+		JsonElement encoded = MetaRunState.CODEC
+				.encodeStart(JsonOps.INSTANCE, sent).getOrThrow();
+		MetaRunState got = MetaRunState.CODEC
+				.parse(JsonOps.INSTANCE, encoded).getOrThrow();
+
+		check(got.rerollCharges() == 7, "rerollCharges survives as 7");
+		check(got.rerollsForbidden(), "rerollsForbidden survives as true");
+		check(got.halfEntropyPending(), "halfEntropyPending survives as true");
+		check(got.doubledEffectId().equals("heavy_boots"), "the doubled id survives");
+		check(!got.doubleNextCursePending(),
+				"doubleNextCursePending survives as FALSE, not swapped with its neighbours");
+		check(got.extremeTierPending(),
+				"extremeTierPending survives as true, distinct from the flag before it");
+
+		// A save written before this record existed has no fields at all inside it,
+		// and must load as a run holding no meta effects rather than failing.
+		MetaRunState empty = MetaRunState.CODEC
+				.parse(JsonOps.INSTANCE, new com.google.gson.JsonObject()).getOrThrow();
+		check(empty.equals(MetaRunState.EMPTY),
+				"an empty object loads as EMPTY -- every field is optionalFieldOf with a default");
+
+		// And the whole EntropyManager still round-trips with the nested block, which
+		// is the check that the group() limit was resolved rather than worked around
+		// in a way that drops data.
+		EntropyManager manager = new EntropyManager();
+		grantWithoutServer(manager, AllInBehavior.ID);
+		MetaRunState view = manager.meta();
+		check(view.rerollCharges() == AllInBehavior.GRANTED_CHARGES,
+				"the manager's meta() view reports the live charge count");
+		check(view.doubleNextCursePending(), "...and the live All In arming flag");
+
+		JsonElement runJson = EntropyManager.CODEC
+				.encodeStart(JsonOps.INSTANCE, manager).getOrThrow();
+		EntropyManager reloaded = EntropyManager.CODEC
+				.parse(JsonOps.INSTANCE, runJson).getOrThrow();
+		check(reloaded.getRerollCharges() == AllInBehavior.GRANTED_CHARGES,
+				"banked charges survive a save/load round trip");
+		check(reloaded.isDoubleNextCursePending(),
+				"...and so does All In's pending arming, so a relog cannot disarm it");
+		check(reloaded.acquired().contains(AllInBehavior.ID),
+				"...alongside the acquired set, in the same codec");
+
+		// The doubled effect must be re-derived from persisted state on every apply,
+		// which is what keeps the doubling idempotent across a respawn.
+		EntropyManager doubled = EntropyManager.CODEC.parse(JsonOps.INSTANCE,
+				EntropyManager.CODEC.encodeStart(JsonOps.INSTANCE, manager).getOrThrow())
+				.getOrThrow();
+		checkNear(doubled.severityMultiplierFor("nothing_doubled_yet"), 1.0, 1e-9,
+				"an unmarked effect lands at ordinary severity");
+
+		// --- all five effects' state, end to end through the REAL run codec ---
+		//
+		// Not just the nested record: the claim that matters to a player is that a
+		// trip through the main menu does not undo a curse, and only the full
+		// EntropyManager round trip states that.
+		EntropyManager full = new EntropyManager();
+		grantWithoutServer(full, BankedEntropyBehavior.ID);
+		grantWithoutServer(full, TwinFateBehavior.ID);
+		grantWithoutServer(full, AllInBehavior.ID);
+		grantWithoutServer(full, DebtCollectorBehavior.ID);
+		grantWithoutServer(full, NoDoOversBehavior.ID);
+
+		EntropyManager back = EntropyManager.CODEC.parse(JsonOps.INSTANCE,
+				EntropyManager.CODEC.encodeStart(JsonOps.INSTANCE, full).getOrThrow())
+				.getOrThrow();
+		for (String id : new String[] {BankedEntropyBehavior.ID, TwinFateBehavior.ID,
+				AllInBehavior.ID, DebtCollectorBehavior.ID, NoDoOversBehavior.ID}) {
+			check(back.acquired().contains(id), id + " survives a save/load");
+		}
+		check(back.areRerollsForbidden(),
+				"No Do-Overs' ban survives -- a relog cannot lift it");
+		check(back.getRerollCharges() == AllInBehavior.GRANTED_CHARGES,
+				"All In's banked charges survive, unrefunded and still unreachable");
+		check(back.rerollState() == RerollState.FORBIDDEN,
+				"...and the reloaded run still renders as FORBIDDEN rather than CHARGED");
+		check(back.isDoubleNextCursePending(),
+				"All In's pending arming survives, so a relog cannot disarm the doubling");
+		check(back.isExtremeTierPending(),
+				"Debt Collector's one-shot survives, so a relog cannot dodge the extreme tier");
+
+		// Banked Entropy's carry specifically, in BOTH positions -- the false case is
+		// the one a default could accidentally satisfy, so the true case is what
+		// proves the field is really being written.
+		MetaRunState carrySet = MetaRunState.CODEC.parse(JsonOps.INSTANCE,
+				MetaRunState.CODEC.encodeStart(JsonOps.INSTANCE,
+						new MetaRunState(0, false, true, "", false, false)).getOrThrow())
+				.getOrThrow();
+		check(carrySet.halfEntropyPending(),
+				"Banked Entropy's carry survives as TRUE -- a reload cannot hand back a free pick");
+		MetaRunState carryClear = MetaRunState.CODEC.parse(JsonOps.INSTANCE,
+				MetaRunState.CODEC.encodeStart(JsonOps.INSTANCE,
+						new MetaRunState(0, false, false, "", false, false)).getOrThrow())
+				.getOrThrow();
+		check(!carryClear.halfEntropyPending(), "...and as FALSE, distinct from the default");
+
+		// The doubled curse's severity is re-derived from the RELOADED state, which
+		// is what makes the doubling idempotent across a relog as well as a respawn.
+		MetaRunState marked = new MetaRunState(0, false, false, "heavy_boots", false, false);
+		EntropyManager doubledRun = EntropyManager.CODEC.parse(JsonOps.INSTANCE,
+				MetaRunState.CODEC.encodeStart(JsonOps.INSTANCE, marked)
+						.map(meta -> {
+							com.google.gson.JsonObject run = new com.google.gson.JsonObject();
+							run.add("meta", meta);
+							return (JsonElement) run;
+						}).getOrThrow()).getOrThrow();
+		checkNear(doubledRun.severityMultiplierFor("heavy_boots"),
+				AllInBehavior.SEVERITY_MULTIPLIER, 1e-12,
+				"the doubled curse is still doubled after a reload");
+		checkNear(doubledRun.severityMultiplierFor("brittle_bones"), 1.0, 1e-12,
+				"...and nothing else is");
+
+		// An id this build no longer defines is dropped rather than carried, the same
+		// treatment an unknown id in the acquired set gets -- otherwise
+		// severityMultiplierFor would compare forever against a string nothing matches.
+		MetaRunState stale = new MetaRunState(0, false, false, "an_effect_that_was_deleted",
+				false, false);
+		check(EffectRegistry.byId(stale.doubledEffectId()) == null,
+				"the stale id genuinely does not resolve");
+		EntropyManager staleRun = EntropyManager.CODEC.parse(JsonOps.INSTANCE,
+				MetaRunState.CODEC.encodeStart(JsonOps.INSTANCE, stale)
+						.map(meta -> {
+							com.google.gson.JsonObject run = new com.google.gson.JsonObject();
+							run.add("meta", meta);
+							return (JsonElement) run;
+						}).getOrThrow()).getOrThrow();
+		check(staleRun.getDoubledEffectId().isEmpty(),
+				"a doubled id this build no longer defines is dropped on load, not carried");
+	}
+
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The doubled severity is idempotent, and the five meta effects apply nothing.
+	 *
+	 * <p><b>This is the guarantee All In was most at risk of breaking.</b> Every
+	 * effect's {@code apply} runs again on every respawn, rejoin and dimension
+	 * change, and the multiplier is a new input to that path. The claim is that it
+	 * changes the VALUE and not the arithmetic: ten applications at 2.0 must leave
+	 * exactly one modifier holding exactly the doubled amount, not ten stacked
+	 * copies and not a value that drifts.
+	 *
+	 * <p>It holds because the multiplier is derived from persisted run state rather
+	 * than remembered on the modifier, so each re-application recomputes the same
+	 * number and {@code addOrUpdateTransientModifier} replaces by {@code Identifier}
+	 * exactly as it does at 1.0. Driven against a real {@code AttributeInstance},
+	 * not a mock.
+	 */
+	private static void doubledSeverityIdempotency() {
+		section("All In: doubled severity is idempotent and correctly scaled");
+
+		for (String id : EffectRegistry.SCALABLE_SEVERITY_IDS) {
+			AttributeEffectBehavior behavior =
+					(AttributeEffectBehavior) EffectBehaviors.get(id);
+			for (AttributeEffectBehavior.Change change : behavior.changes()) {
+				double base = ((net.minecraft.world.entity.ai.attributes.RangedAttribute)
+						change.attribute().value()).getDefaultValue();
+				net.minecraft.world.entity.ai.attributes.AttributeInstance instance =
+						new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+								change.attribute(), a -> { });
+				instance.setBaseValue(base);
+
+				// Exactly what AttributeEffectBehavior.apply does, ten times over.
+				double doubled = change.amount() * AllInBehavior.SEVERITY_MULTIPLIER;
+				for (int i = 0; i < 10; i++) {
+					instance.addOrUpdateTransientModifier(
+							new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+									AttributeEffectBehavior.modifierId(id), doubled,
+									change.operation()));
+				}
+				check(instance.getModifiers().size() == 1,
+						id + ": ten doubled applications leave ONE modifier, not ten");
+				double afterTen = instance.getValue();
+
+				// And the same value a single application produces -- the property that
+				// actually matters, since one stacked copy would still be "one modifier"
+				// if the amount had been accumulated instead of replaced.
+				net.minecraft.world.entity.ai.attributes.AttributeInstance once =
+						new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+								change.attribute(), a -> { });
+				once.setBaseValue(base);
+				once.addOrUpdateTransientModifier(
+						new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+								AttributeEffectBehavior.modifierId(id), doubled,
+								change.operation()));
+				checkNear(afterTen, once.getValue(), 1e-12,
+						id + ": the value after ten applications equals the value after one");
+
+				// The doubling is a real change, not a no-op -- so a severity that
+				// silently failed to apply could not pass this section.
+				net.minecraft.world.entity.ai.attributes.AttributeInstance single =
+						new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+								change.attribute(), a -> { });
+				single.setBaseValue(base);
+				single.addOrUpdateTransientModifier(
+						new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+								AttributeEffectBehavior.modifierId(id), change.amount(),
+								change.operation()));
+
+				var range = (net.minecraft.world.entity.ai.attributes.RangedAttribute)
+						change.attribute().value();
+				// weak_grip is the ONE documented exception and it is asserted as one
+				// rather than excused: the 1x value already drives a bare base to the
+				// 0.0 floor, so at the bare base doubled and single are both 0.0.
+				// Everywhere else the multiplier must be observable in the value, or a
+				// severity that silently failed to apply would pass this section.
+				boolean alreadyClamped =
+						Math.abs(single.getValue() - range.sanitizeValue(
+								single.getValue() + change.amount())) < 1e-12
+								&& Math.abs(once.getValue() - single.getValue()) < 1e-12;
+				if (alreadyClamped) {
+					check(id.equals("weak_grip"),
+							id + ": only weak_grip may be clamped at the bare base -- anything else "
+									+ "reaching a clamp at 2x does not belong in the subset");
+					// It IS observable with a weapon fitted, which is the case the effect
+					// is really about. That is what makes it a member rather than a dud.
+					net.minecraft.world.entity.ai.attributes.AttributeInstance armed =
+							new net.minecraft.world.entity.ai.attributes.AttributeInstance(
+									change.attribute(), a -> { });
+					armed.setBaseValue(base);
+					armed.addOrUpdateTransientModifier(
+							new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+									net.minecraft.resources.Identifier.parse(
+											"entropymod:harness/weapon"),
+									5.0, net.minecraft.world.entity.ai.attributes
+											.AttributeModifier.Operation.ADD_VALUE));
+					armed.addOrUpdateTransientModifier(
+							new net.minecraft.world.entity.ai.attributes.AttributeModifier(
+									AttributeEffectBehavior.modifierId(id), doubled,
+									change.operation()));
+					checkNear(armed.getValue(), base + 5.0 + doubled, 1e-9,
+							id + ": with a weapon fitted the doubled penalty IS observable "
+									+ "(the bare-handed clamp is the 1x effect's own outcome)");
+				} else {
+					check(Math.abs(once.getValue() - single.getValue()) > 1e-9,
+							id + ": doubled and single differ -- the multiplier reaches the value");
+				}
+
+				// And the doubled value is on the right side of it: strictly worse.
+				boolean higherIsWorse = change.attribute()
+								== net.minecraft.world.entity.ai.attributes.Attributes
+										.FALL_DAMAGE_MULTIPLIER
+						|| change.attribute() == net.minecraft.world.entity.ai.attributes
+								.Attributes.GRAVITY;
+				check(higherIsWorse ? once.getValue() >= single.getValue()
+								: once.getValue() <= single.getValue(),
+						id + ": doubled is strictly worse than single, never better");
+
+				// No clamp is reached. This is the claim the subset's membership rests
+				// on, and it is the one a later addition is most likely to get wrong.
+				var ranged = (net.minecraft.world.entity.ai.attributes.RangedAttribute)
+						change.attribute().value();
+				checkNear(ranged.sanitizeValue(once.getValue()), once.getValue(), 1e-12,
+						id + ": the doubled value is inside the attribute's range -- no clamp");
+			}
+		}
+
+		// The multiplier defaults to 1.0 everywhere else, so an unmarked effect is
+		// byte-for-byte what it was before this batch.
+		EntropyManager unmarked = new EntropyManager();
+		for (EffectDefinition def : EffectRegistry.all()) {
+			checkNear(unmarked.severityMultiplierFor(def.id()), 1.0, 1e-12,
+					"UNREGRESSED: '" + def.id() + "' lands at ordinary severity on a run with "
+							+ "no All In");
+		}
+
+		// The five meta effects apply NOTHING to the player. Four are
+		// HookEffectBehavior (final empty apply, so a subclass cannot quietly add
+		// per-player state); Twin Fate implements the interface directly because its
+		// content is expandGrant, and its apply is empty by inspection.
+		for (String id : new String[] {BankedEntropyBehavior.ID, AllInBehavior.ID,
+				DebtCollectorBehavior.ID, NoDoOversBehavior.ID}) {
+			check(EffectBehaviors.get(id) instanceof HookEffectBehavior,
+					id + " is a HookEffectBehavior -- apply is final and empty, so membership "
+							+ "in the acquired set IS the effect and respawn needs no work");
+		}
+		check(!(EffectBehaviors.get(TwinFateBehavior.ID) instanceof AttributeEffectBehavior),
+				"Twin Fate touches no attribute -- it has no effect of its own");
+	}
+
 	/**
 	 * There is no server in a headless harness, so applying to the player list
 	 * throws. The state written before that point is what is under test.
@@ -902,8 +1712,13 @@ public final class HarnessMain {
 		// Three states, so "never had it" and "had it and spent it" stay distinct --
 		// a boolean could not tell those apart, which is why the payload field is an
 		// enum now.
-		check(RerollState.values().length == 3,
-				"NOT_OWNED / AVAILABLE / SPENT are distinct states, not a boolean");
+		// Was 3. CHARGED and FORBIDDEN arrived with All In's banked charges and No
+		// Do-Overs' ban, which are separate run state from rerollUsed -- the point of
+		// the assertion is unchanged: these are distinct states a boolean could not
+		// express, and the client renders each differently.
+		check(RerollState.values().length == 5,
+				"NOT_OWNED / AVAILABLE / CHARGED / SPENT / FORBIDDEN are distinct states, "
+						+ "not a boolean");
 
 		// The ordering fix, stated as the property it guarantees: rerollState() must
 		// be a pure function of ownership and the spent flag, with no dependence on
@@ -934,7 +1749,7 @@ public final class HarnessMain {
 
 		for (RerollState state : RerollState.values()) {
 			OpenChoicePayload sent = new OpenChoicePayload(
-					EffectPhase.BAD, 37, 91, state,
+					EffectPhase.BAD, 37, 91, state, 5,
 					new OpenChoicePayload.Choice("id_one", "Name One", "Desc One"),
 					new OpenChoicePayload.Choice("id_two", "Name Two", "Desc Two"),
 					new OpenChoicePayload.Choice("id_three", "Name Three", "Desc Three"));
@@ -948,6 +1763,11 @@ public final class HarnessMain {
 			check(got.phase() == EffectPhase.BAD, "phase survives (" + state + ")");
 			check(got.entropy() == 37, "entropy is 37, not the cap (" + state + ")");
 			check(got.entropyCap() == 91, "entropyCap is 91, not the entropy (" + state + ")");
+			// Three ints now, all adjacent and all distinct -- which is exactly why this
+			// check is field by field rather than a record equals: 37/91/5 swapped in a
+			// way that cancels would still pass an equality test.
+			check(got.rerollCharges() == 5,
+					"rerollCharges is 5, not the entropy or the cap (" + state + ")");
 			check(got.choice1().id().equals("id_one")
 							&& got.choice1().name().equals("Name One")
 							&& got.choice1().description().equals("Desc One"),
@@ -3866,8 +4686,13 @@ public final class HarnessMain {
 		// was never "only one may exist", it was that Unstable had no precedent to
 		// appeal to at the time. Earthquake does, and used it.
 		long falseCount = EffectRegistry.all().stream().filter(d -> !d.counterplay()).count();
-		check(falseCount == 2,
-				"counterplay = false is still rare and deliberate -- " + falseCount + " of "
+		// 3 now: Debt Collector joined them, and NOT by choice -- the extreme BAD
+		// tier is exactly these effects, so an effect whose content is 'you will be
+		// handed one of those' cannot honestly be labelled survivable. The shape the
+		// check pins is unchanged and is asserted separately below: every one sits
+		// at 40-60.
+		check(falseCount == 3,
+				"counterplay = false is rare and deliberate -- " + falseCount + " of "
 						+ EffectRegistry.all().size() + " effects (Unstable, Earthquake), both "
 						+ "at 40-60, neither excused by the other");
 		for (EffectDefinition d : EffectRegistry.all()) {

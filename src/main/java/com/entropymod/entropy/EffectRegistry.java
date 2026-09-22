@@ -12,7 +12,7 @@ import java.util.stream.Collectors;
  * need to be added -- the timer, GUI, and networking code never change when you
  * add effect #47.
  *
- * <p><b>Current content: 61 effects — 31 GOOD and 30 BAD, all permanent.</b>
+ * <p><b>Current content: 72 effects — 34 GOOD and 38 BAD, all permanent.</b>
  * Tier 1 is 34 (17 GOOD / 17 BAD) at entropy 0-25; the rest are Tier 2 at
  * entropy 25-50, plus Glass Cannon Pact, Unstable and Earthquake at 40-60. It is
  * a baseline, not the finished game: Tiers 3-4 and the odd/signature effects
@@ -269,10 +269,12 @@ public final class EffectRegistry {
 				EffectCategory.COMBAT, EffectPhase.GOOD, 25, 50, true);
 
 		// BAD despite the attack-speed half reading as a buff: the two
-		// ADD_MULTIPLIED_TOTAL factors multiply out to x0.475 DPS for every weapon.
+		// ADD_MULTIPLIED_TOTAL factors multiply out to x0.76 DPS for every weapon.
+		// Retuned from -0.75 (x0.25 damage, x0.475 DPS); the description moved with
+		// the number, because "a quarter" was true at -0.75 and is not at -0.60.
 		// See HumanMachinegunBehavior for the full derivation.
 		register("human_machinegun", "Human Machinegun",
-				"You swing 90% faster and hit for a quarter as much",
+				"You swing 90% faster and hit for two fifths as much",
 				EffectCategory.COMBAT, EffectPhase.BAD, 25, 50, true);
 
 		// Reuses vanilla's own BedRule.explodes() branch. Counterplay is true for
@@ -286,6 +288,63 @@ public final class EffectRegistry {
 				"Every food source restores 75% less hunger and saturation",
 				EffectCategory.SURVIVAL, EffectPhase.BAD, 25, 50, true);
 
+		// =================================================================
+		// TIER 2 META -- effects that change the PICK LOOP, not the player
+		//
+		// All five are META, which is semantically right and has a consequence
+		// worth knowing rather than discovering: anti-stacking excludes a whole
+		// category once occupied, so holding ANY of these (or Second Guess,
+		// Fast Learner, Slow Learner) keeps the rest out of the roll for the
+		// phase they share. Anti-stacking is a SOFT rule dropped first when the
+		// pool empties, so collisions are reachable -- but in ordinary play
+		// these are close to mutually exclusive. Testing them together is what
+		// /entropygrant is for; it bypasses the roll entirely.
+		// =================================================================
+
+		// Halves entropy gain for the REST OF THE RUN via a carry flag: +0 on one
+		// pick, +1 on the next, forever. Exactly half, using only integer entropy.
+		// 45-60 because that is a run-defining blessing early and a modest one
+		// late, and the window is the only lever the roll offers -- see
+		// BankedEntropyBehavior.
+		register("banked_entropy", "Banked Entropy",
+				"Entropy now rises half as fast -- every other pick is free",
+				EffectCategory.META, EffectPhase.GOOD, 45, 60, true);
+
+		// Grants BOTH the other two cards shown alongside it. 40-50: above the
+		// whole Tier 2 mass so it is never an early-run option, and capped at 50
+		// because above that the GOOD pool collapses to Glass Cannon Pact alone
+		// and a Twin Fate that is one card of two is the default, not a highlight.
+		register("twin_fate", "Twin Fate",
+				"Take both of the other two blessings offered with this one",
+				EffectCategory.META, EffectPhase.GOOD, 40, 50, true);
+
+		// Banks 2 reroll charges now; the next curse you take is drawn from the
+		// scalable subset and applied at DOUBLE strength. counterplay = true: every
+		// member of that subset is a Tier 1 attribute curse whose doubled form is
+		// still survivable -- see SCALABLE_SEVERITY_IDS for the per-effect clamp.
+		register("all_in", "All In",
+				"Two rerolls, banked -- and the next curse you take hits twice as hard",
+				EffectCategory.META, EffectPhase.BAD, 25, 50, true);
+
+		// Forces the next bad-phase roll to draw only from the most extreme tier
+		// that exists, ignoring the entropy window for that one roll.
+		//
+		// 40-60 and counterplay = FALSE, and neither is a choice. The extreme BAD
+		// tier is Unstable and Earthquake, both counterplay = false, so this
+		// effect DELIVERS one -- CLAUDE.md Part 2 forbids that below entropy 40,
+		// and labelling it true would be labelling the thing it hands you.
+		// 40-60 is Unstable's and Earthquake's own window.
+		register("debt_collector", "Debt Collector",
+				"Your next curse is drawn from the worst the run has to offer",
+				EffectCategory.META, EffectPhase.BAD, 40, 60, false);
+
+		// counterplay = true, and it means it: it takes away a safety net rather
+		// than doing anything to the player. A run that never had Second Guess and
+		// never met All In loses nothing at all.
+		register("no_do_overs", "No Do-Overs",
+				"Rerolling is forbidden for the rest of the run -- banked charges included",
+				EffectCategory.META, EffectPhase.BAD, 25, 55, true);
+
 		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
 		// See entropy-modpack-effects.md for the full list to port over.
 	}
@@ -295,6 +354,131 @@ public final class EffectRegistry {
 								  int minEntropy, int maxEntropy, boolean counterplay) {
 		ALL.add(new EffectDefinition(id, displayName, description, category, phase,
 				minEntropy, maxEntropy, counterplay));
+	}
+
+	/**
+	 * The BAD effects whose severity can be <b>generically doubled</b>, which is the
+	 * pool All In draws from. Eight of thirty-five, and the shortness is the finding
+	 * rather than a gap in the investigation.
+	 *
+	 * <p>The rule is mechanical: the effect must be an
+	 * {@link AttributeEffectBehavior} -- so "twice as severe" is literally
+	 * {@code amount * 2} with no per-effect code -- <b>and</b> every one of its
+	 * {@code Change}s must be unambiguously a penalty, <b>and</b> the doubled value
+	 * must not land on a clamp that makes it degenerate.
+	 *
+	 * <table border="1">
+	 *   <caption>the subset, with the doubled value each one really produces</caption>
+	 *   <tr><th>effect</th><th>attribute</th><th>1x -&gt; 2x</th><th>result</th></tr>
+	 *   <tr><td>heavy_boots</td><td>MOVEMENT_SPEED</td><td>-0.15 -&gt; -0.30</td>
+	 *       <td>0.1 -&gt; 0.07 (4.32 -&gt; 3.02 b/s)</td></tr>
+	 *   <tr><td>brittle_bones</td><td>MAX_HEALTH</td><td>-4.0 -&gt; -8.0</td>
+	 *       <td>20 -&gt; 12, six hearts; floor is 1.0</td></tr>
+	 *   <tr><td>weak_grip</td><td>ATTACK_DAMAGE</td><td>-2.0 -&gt; -4.0</td>
+	 *       <td>iron sword 6.0 -&gt; 2.0; bare-handed was already clamped to 0.0</td></tr>
+	 *   <tr><td>sluggish_strikes</td><td>ATTACK_SPEED</td><td>-0.20 -&gt; -0.40</td>
+	 *       <td>4.0 -&gt; 2.4; floor 0.0 unreached</td></tr>
+	 *   <tr><td>glass_jaw</td><td>FALL_DAMAGE_MULTIPLIER</td><td>+0.40 -&gt; +0.80</td>
+	 *       <td>1.0 -&gt; 1.8</td></tr>
+	 *   <tr><td>dull_blade</td><td>BLOCK_BREAK_SPEED</td><td>-0.20 -&gt; -0.40</td>
+	 *       <td>1.0 -&gt; 0.6</td></tr>
+	 *   <tr><td>leaden_legs</td><td>GRAVITY</td><td>+0.40 -&gt; +0.80</td>
+	 *       <td>0.08 -&gt; 0.144; max is 1.0</td></tr>
+	 *   <tr><td>stone_feet</td><td>JUMP_STRENGTH</td><td>-0.40 -&gt; -0.80</td>
+	 *       <td>0.42 -&gt; 0.084; floor 0.0 unreached</td></tr>
+	 * </table>
+	 *
+	 * <p><b>The three harshest members, flagged rather than left to be met in play.</b>
+	 * Doubled {@code stone_feet} leaves a jump apex near 0.06 blocks and doubled
+	 * {@code leaden_legs} near 0.70 -- neither clears anything, and the world stays
+	 * traversable only because {@code STEP_HEIGHT} is untouched at 0.6, so slabs and
+	 * stairs still auto-step. That is the same argument the skill records for their
+	 * 1x values, at a larger magnitude. Doubled {@code weak_grip} is invisible
+	 * bare-handed, because the 1x value already clamps that case to 0.0.
+	 *
+	 * <p><b>Excluded, and each for a stated reason rather than by omission:</b>
+	 * <ul>
+	 *   <li><b>unlucky</b> -- mechanically fine ({@code LUCK}'s floor is -1024), but
+	 *       -4 luck against -2 is a shift in loot-table weighting no player can
+	 *       observe. That is the perceptual-threshold failure this project has hit
+	 *       four times; a doubled severity nobody can feel reads as broken.</li>
+	 *   <li><b>giant_size, human_machinegun</b> -- attribute-driven but <b>mixed
+	 *       valence</b>. Doubling also doubles Giant Size's +10 hearts, -25% damage
+	 *       taken and +6.5 reach, and Human Machinegun's +90% attack speed. "Twice
+	 *       as severe" would make both of them <em>better</em>.</li>
+	 *   <li><b>every hook-driven curse</b> (24 of them) -- their magnitude is a
+	 *       {@code static final} read by a mixin or a tick service, not a modifier
+	 *       amount, so there is no generic doubling operation at all: only
+	 *       twenty-four separate decisions. And several have no meaningful 2x even
+	 *       then. {@code exposed}'s 1.25 detection multiplier is already at its
+	 *       saturation point (any value at or above it behaves identically);
+	 *       {@code clumsy_digger}'s chance saturates at 2x wear; {@code blight_touched}
+	 *       is already <em>every</em> crop; and {@code loose_footing},
+	 *       {@code nightmares}, {@code flamboyant}, {@code upside_down_camera} and
+	 *       {@code randomized_controls} are booleans that are already total.</li>
+	 * </ul>
+	 *
+	 * <p>Kept here rather than in {@code AllInBehavior} on purpose: this is metadata
+	 * <em>about registry entries</em>, and this class is deliberately free of
+	 * Minecraft imports. Reaching into the behavior package for it would pull
+	 * {@code EffectContext} -- and therefore {@code MinecraftServer} -- into the one
+	 * file the headless harness drives everything else from.
+	 *
+	 * <p><b>Adding an entry is a claim about a clamp.</b> Check the doubled value
+	 * against the attribute table in the {@code entropy-effects} skill first; the
+	 * harness asserts every member is attribute-driven and all-penalty, but it
+	 * cannot tell you whether 2x is playable.
+	 */
+	public static final Set<String> SCALABLE_SEVERITY_IDS = Set.of(
+			"heavy_boots",
+			"brittle_bones",
+			"weak_grip",
+			"sluggish_strikes",
+			"glass_jaw",
+			"dull_blade",
+			"leaden_legs",
+			"stone_feet");
+
+	/**
+	 * A one-roll replacement for the normal entropy-window eligibility test.
+	 *
+	 * <p>Both non-{@code NONE} values <b>ignore {@link EffectDefinition#eligibleAt}
+	 * entirely</b>, and for All In that is load-bearing rather than incidental: every
+	 * member of {@link #SCALABLE_SEVERITY_IDS} is a Tier 1 curse capped at entropy
+	 * 25, while All In itself cannot be offered below 25 -- so honouring the window
+	 * would leave the forced pool permanently empty and the effect would silently do
+	 * nothing.
+	 *
+	 * <p>No-repeat and anti-stacking still apply on top, in the usual priority
+	 * order. An override narrows the pool; it does not suspend the rules.
+	 */
+	public enum PoolOverride {
+		/** Ordinary eligibility -- the entropy window decides. */
+		NONE,
+		/** Debt Collector: only the most extreme tier this build defines for the phase. */
+		EXTREME_TIER,
+		/** All In: only curses whose severity can be generically doubled. */
+		SCALABLE_SEVERITY
+	}
+
+	/**
+	 * The effects of this phase with the <b>highest {@code minEntropy} any effect of
+	 * this phase has</b> -- i.e. the most extreme tier that currently exists.
+	 *
+	 * <p>Derived rather than listed, so adding Tier 3 moves Debt Collector's target
+	 * with it and no constant goes stale. For BAD today that is entropy 40:
+	 * Unstable, Earthquake and Debt Collector itself -- the last of which no-repeat
+	 * removes, since by the time the flag is read it has been acquired.
+	 */
+	public static List<EffectDefinition> extremeTier(EffectPhase phase) {
+		int floor = ALL.stream()
+				.filter(e -> e.phase() == phase)
+				.mapToInt(EffectDefinition::minEntropy)
+				.max()
+				.orElse(Integer.MIN_VALUE);
+		return ALL.stream()
+				.filter(e -> e.phase() == phase && e.minEntropy() == floor)
+				.collect(Collectors.toList());
 	}
 
 	/** Every registered effect, in registration order. Unmodifiable. */
@@ -357,7 +541,29 @@ public final class EffectRegistry {
 	public static RollResult roll(EffectPhase phase, int entropy, Random random,
 								  Set<String> alreadyPicked,
 								  Set<EffectCategory> excludedCategories) {
-		List<EffectDefinition> eligible = eligible(phase, entropy);
+		return roll(phase, entropy, random, alreadyPicked, excludedCategories, PoolOverride.NONE);
+	}
+
+	/**
+	 * As {@link #roll(EffectPhase, int, Random, Set, Set)}, but with the starting
+	 * pool replaced by a {@link PoolOverride}.
+	 *
+	 * <p>The override replaces <b>only</b> the entropy-window eligibility step. Both
+	 * exclusion rules still run on the result, in the same priority order and with
+	 * the same fallbacks, so a forced roll cannot re-offer something already taken
+	 * and cannot quietly stop being subject to anti-stacking.
+	 */
+	public static RollResult roll(EffectPhase phase, int entropy, Random random,
+								  Set<String> alreadyPicked,
+								  Set<EffectCategory> excludedCategories,
+								  PoolOverride override) {
+		List<EffectDefinition> eligible = switch (override) {
+			case NONE -> eligible(phase, entropy);
+			case EXTREME_TIER -> extremeTier(phase);
+			case SCALABLE_SEVERITY -> ALL.stream()
+					.filter(e -> e.phase() == phase && SCALABLE_SEVERITY_IDS.contains(e.id()))
+					.collect(Collectors.toList());
+		};
 
 		List<EffectDefinition> unpicked = eligible.stream()
 				.filter(e -> !alreadyPicked.contains(e.id()))

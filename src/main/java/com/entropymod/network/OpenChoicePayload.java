@@ -26,6 +26,7 @@ public record OpenChoicePayload(
 		int entropy,
 		int entropyCap,
 		RerollState rerollState,
+		int rerollCharges,
 		Choice choice1,
 		Choice choice2,
 		Choice choice3
@@ -49,11 +50,18 @@ public record OpenChoicePayload(
 	// could not distinguish "never had Second Guess" from "had it and spent it",
 	// which is exactly the difference between drawing no button and drawing a
 	// greyed one -- see RerollState.
+	//
+	// rerollCharges rides alongside it rather than being folded into the enum: the
+	// state answers "which button do I draw", the count answers "what does its
+	// label say". An enum cannot carry a number, and a button reading "Reroll"
+	// where the player has two banked is hiding the thing they most want to know.
+	// It is meaningful only for CHARGED and is 0 otherwise.
 	public static final StreamCodec<RegistryFriendlyByteBuf, OpenChoicePayload> CODEC = StreamCodec.composite(
 			PHASE_CODEC, OpenChoicePayload::phase,
 			ByteBufCodecs.VAR_INT, OpenChoicePayload::entropy,
 			ByteBufCodecs.VAR_INT, OpenChoicePayload::entropyCap,
 			EntropyCodecs.REROLL_STATE, OpenChoicePayload::rerollState,
+			ByteBufCodecs.VAR_INT, OpenChoicePayload::rerollCharges,
 			Choice.CODEC, OpenChoicePayload::choice1,
 			Choice.CODEC, OpenChoicePayload::choice2,
 			Choice.CODEC, OpenChoicePayload::choice3,
@@ -71,12 +79,13 @@ public record OpenChoicePayload(
 	}
 
 	public static OpenChoicePayload fromChoices(EffectPhase phase, int entropy, int entropyCap,
-												RerollState rerollState, List<EffectDefinition> choices) {
+												RerollState rerollState, int rerollCharges,
+												List<EffectDefinition> choices) {
 		EffectDefinition a = choices.get(0);
 		EffectDefinition b = choices.size() > 1 ? choices.get(1) : choices.get(0);
 		EffectDefinition c = choices.size() > 2 ? choices.get(2) : choices.get(0);
 		return new OpenChoicePayload(
-				phase, entropy, entropyCap, rerollState,
+				phase, entropy, entropyCap, rerollState, rerollCharges,
 				new Choice(a.id(), a.displayName(), a.description()),
 				new Choice(b.id(), b.displayName(), b.description()),
 				new Choice(c.id(), c.displayName(), c.description())

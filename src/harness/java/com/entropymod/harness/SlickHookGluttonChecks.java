@@ -419,7 +419,10 @@ final class SlickHookGluttonChecks {
 		double speedAmount = Checks.constant(HumanMachinegunBehavior.class, "ATTACK_SPEED_BONUS");
 		double dmgAmount = Checks.constant(HumanMachinegunBehavior.class, "ATTACK_DAMAGE_PENALTY");
 		checkNear(speedAmount, 0.90, 1e-9, "attack speed amount is +0.90");
-		checkNear(dmgAmount, -0.75, 1e-9, "attack damage amount is -0.75");
+		checkNear(dmgAmount, -0.60, 1e-9,
+				"attack damage amount is -0.60 -- RETUNED from -0.75, and the retune is much "
+						+ "larger than the constant looks: the damage FACTOR rose from 0.25 to 0.40, "
+						+ "60% of itself, so the net DPS penalty went from -52.5% to -24%");
 
 		AttributeEffectBehavior behavior =
 				(AttributeEffectBehavior) EffectBehaviors.get(HumanMachinegunBehavior.ID);
@@ -462,14 +465,14 @@ final class SlickHookGluttonChecks {
 					w.name() + ": attack speed is EXACTLY x1.90 (" + round(speedNormal)
 							+ " -> " + round(speedCursed) + " per second, cooldown "
 							+ round(20 / speedNormal) + " -> " + round(20 / speedCursed) + " ticks)");
-			checkNear(dmgCursed / dmgNormal, 0.25, 1e-9,
-					w.name() + ": attack damage is EXACTLY x0.25 (" + round(dmgNormal)
+			checkNear(dmgCursed / dmgNormal, 0.40, 1e-9,
+					w.name() + ": attack damage is EXACTLY x0.40 (" + round(dmgNormal)
 							+ " -> " + round(dmgCursed) + ")");
-			checkNear((speedCursed * dmgCursed) / (speedNormal * dmgNormal), 0.475, 1e-9,
-					w.name() + ": net DPS is x0.475 -- " + round(speedNormal * dmgNormal)
+			checkNear((speedCursed * dmgCursed) / (speedNormal * dmgNormal), 0.76, 1e-9,
+					w.name() + ": net DPS is x0.76 -- " + round(speedNormal * dmgNormal)
 							+ " -> " + round(speedCursed * dmgCursed));
 		}
-		checkNear(HumanMachinegunBehavior.dpsFactor(), 0.475, 1e-9,
+		checkNear(HumanMachinegunBehavior.dpsFactor(), 0.76, 1e-9,
 				"...and the shipped dpsFactor() agrees, so the constants and the claim are one thing");
 
 		// --- WHY ADD_MULTIPLIED_TOTAL, corrected against the real calculateValue ---
@@ -479,25 +482,25 @@ final class SlickHookGluttonChecks {
 		//     e = d;    for (ADD_MULTIPLIED_BASE)  e += d * amount;   <-- d, not base
 		//               for (ADD_MULTIPLIED_TOTAL) e *= 1 + amount;
 		// So for a SINGLE modifier the two operations are identical.
-		double viaBase = value(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, -0.75,
+		double viaBase = value(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, dmgAmount,
 				AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
-		double viaTotal = value(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, -0.75,
+		double viaTotal = value(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, dmgAmount,
 				AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);
 		checkNear(viaBase, viaTotal, 1e-9,
-				"held ALONE the two operations agree exactly (both 1.50 on an iron sword), because "
+				"held ALONE the two operations agree exactly (both 2.40 on an iron sword), because "
 						+ "ADD_MULTIPLIED_BASE multiplies base + the ADD_VALUE pass -- i.e. the "
 						+ "weapon is already included. The choice is NOT about a single modifier");
 
 		// It is about STACKING, and the shape of the argument is Embrace the Moon's.
-		double stackedBase = stacked(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, -0.75,
+		double stackedBase = stacked(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, dmgAmount,
 				AttributeModifier.Operation.ADD_MULTIPLIED_BASE);
-		double stackedTotal = stacked(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, -0.75,
+		double stackedTotal = stacked(Attributes.ATTACK_DAMAGE, baseDamage, 5.0, dmgAmount,
 				AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);
 		checkNear(stackedBase, 0.0, 1e-9,
-				"TWO -0.75 ADD_MULTIPLIED_BASE modifiers accumulate ADDITIVELY to -1.5x, i.e. "
+				"TWO -0.60 ADD_MULTIPLIED_BASE modifiers accumulate ADDITIVELY to -1.2x, i.e. "
 						+ "NEGATIVE damage, clamped to 0.0 -- an unarmed-forever player");
-		checkNear(stackedTotal / (baseDamage + 5.0), 0.0625, 1e-9,
-				"...whereas ADD_MULTIPLIED_TOTAL composes as a product (0.25 x 0.25 = 0.0625) and "
+		checkNear(stackedTotal / (baseDamage + 5.0), 0.16, 1e-9,
+				"...whereas ADD_MULTIPLIED_TOTAL composes as a product (0.40 x 0.40 = 0.16) and "
 						+ "can never reach zero for any amount above -1. ATTACK_DAMAGE floors at "
 						+ "0.0 and anti-stacking is a SOFT rule dropped first, so this is reachable");
 
@@ -508,8 +511,8 @@ final class SlickHookGluttonChecks {
 				"ATTACK_SPEED floors at 0.0 (unrecoverable), and this effect only ever raises it");
 		check(dmg.sanitizeValue(-1.0) == 0.0, "ATTACK_DAMAGE floors at 0.0");
 		checkNear(value(Attributes.ATTACK_DAMAGE, baseDamage, 0.0, dmgAmount,
-						AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL), 0.25, 1e-9,
-				"bare-handed 0.25 is a real value, not a clamp");
+						AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL), 0.40, 1e-9,
+				"bare-handed 0.40 is a real value, not a clamp");
 
 		// --- composition with the one effect it can meet on this attribute ---
 		AttributeInstance both = instance(Attributes.ATTACK_DAMAGE, baseDamage);
@@ -522,8 +525,8 @@ final class SlickHookGluttonChecks {
 		both.addOrUpdateTransientModifier(new AttributeModifier(
 				AttributeEffectBehavior.modifierId(HumanMachinegunBehavior.ID), dmgAmount,
 				AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL));
-		checkNear(both.getValue(), 2.25, 1e-9,
-				"with Glass Cannon Pact an iron sword is (1.0+5.0)*1.5*0.25 = 2.25 -- the two run "
+		checkNear(both.getValue(), 3.60, 1e-9,
+				"with Glass Cannon Pact an iron sword is (1.0+5.0)*1.5*0.40 = 3.60 -- the two run "
 						+ "in different passes and neither clobbers the other, since every modifier "
 						+ "carries its own Identifier");
 	}

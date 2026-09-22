@@ -102,6 +102,17 @@ public final class EffectBehaviors {
 		register(NightmaresBehavior.ID, new NightmaresBehavior());
 		register(GluttonBehavior.ID, new GluttonBehavior());
 
+		// ---------- TIER 2 META ----------
+		// The first effects whose content is a change to the PICK LOOP rather than
+		// to the player. They are still ordinary one-line registrations: the loop
+		// hooks they use (expandGrant, onAcquired) are defaults on EffectBehavior,
+		// so nothing here or in EffectRegistry needed a special case for them.
+		register(BankedEntropyBehavior.ID, new BankedEntropyBehavior());
+		register(TwinFateBehavior.ID, new TwinFateBehavior());
+		register(AllInBehavior.ID, new AllInBehavior());
+		register(DebtCollectorBehavior.ID, new DebtCollectorBehavior());
+		register(NoDoOversBehavior.ID, new NoDoOversBehavior());
+
 		// TODO: Tiers 2-4 + odd/signature effects, same one-line-per-effect pattern.
 	}
 

@@ -3,6 +3,8 @@ package com.entropymod.entropy;
 import com.entropymod.entropy.companion.CompanionRoster;
 
 import com.entropymod.EntropyMod;
+import com.entropymod.entropy.behavior.AllInBehavior;
+import com.entropymod.entropy.behavior.BankedEntropyBehavior;
 import com.entropymod.entropy.behavior.PhoenixChamberedHeartBehavior;
 import com.entropymod.entropy.behavior.SecondGuessBehavior;
 import com.entropymod.network.ClientEffectsPayload;
@@ -101,7 +103,14 @@ public class EntropyManager extends SavedData {
 			// liveness-based top-up would duplicate on every relog.
 			Codec.unboundedMap(Codec.STRING, Codec.STRING.listOf())
 					.optionalFieldOf("companions", Map.of())
-					.forGetter(m -> m.companions.asMap())
+					.forGetter(m -> m.companions.asMap()),
+			// The Tier 2 meta effects' run state, nested as one object.
+			//
+			// Nested rather than six more flat fields because group() tops out at 16
+			// and this codec was already at 13 -- see MetaRunState for the full note.
+			// Still optionalFieldOf with a default at BOTH levels, so a save written
+			// before the meta effects existed loads as a run holding none of them.
+			MetaRunState.CODEC.optionalFieldOf("meta", MetaRunState.EMPTY).forGetter(m -> m.meta())
 	).apply(instance, EntropyManager::new));
 
 	private static final SavedDataType<EntropyManager> TYPE = new SavedDataType<>(
@@ -147,6 +156,61 @@ public class EntropyManager extends SavedData {
 	 * see {@link #assignMoveScrambleIfAbsent}.
 	 */
 	private String moveScramble = "";
+
+	/**
+	 * Banked rerolls, from All In. <b>A separate counter from
+	 * {@link #rerollUsed}, and deliberately not a replacement for it.</b>
+	 *
+	 * <p>Second Guess's one-shot is a property of owning that effect; this is a
+	 * spendable resource that exists whether or not the player has ever held Second
+	 * Guess. Merging them would mean one number answering two different questions
+	 * -- the exact shape {@link RerollState} exists to avoid on the rendering side.
+	 *
+	 * <p>Spent <b>before</b> Second Guess by {@link #requestReroll}, and
+	 * {@link #rerollState} reports {@code CHARGED} while any remain so the button
+	 * never advertises one resource and consumes another.
+	 */
+	private int rerollCharges = 0;
+
+	/**
+	 * No Do-Overs. Once true, never false again -- the only one-way flag in this
+	 * class.
+	 *
+	 * <p>Checked first in {@link #rerollState} and {@link #requestReroll}, which is
+	 * what makes it retroactive: {@link #rerollCharges} banked before it was set are
+	 * left in place and simply become unreachable. Zeroing them instead would look
+	 * equivalent and would destroy the run's ability to tell "never had charges"
+	 * from "had them taken".
+	 */
+	private boolean rerollsForbidden = false;
+
+	/**
+	 * Banked Entropy's carry bit: true means the next pick pays the full +1 and
+	 * clears it, false means the next pick is free and sets it.
+	 *
+	 * <p>Only consulted while {@link BankedEntropyBehavior#ID} is acquired, so a run
+	 * without the effect never touches it. See that class for why the carry is
+	 * run-wide rather than scoped to the effect's own pick -- the short version is
+	 * that no-repeat makes a second Banked Entropy pick impossible, so a flag only
+	 * that pick could clear would never be cleared at all.
+	 */
+	private boolean halfEntropyPending = false;
+
+	/**
+	 * The one effect All In has doubled, or {@code ""}.
+	 *
+	 * <p>Read by {@link #severityMultiplierFor} on <em>every</em> apply and
+	 * re-apply, which is what keeps the doubling idempotent: the amount is derived
+	 * from this persisted id rather than baked into a modifier, so a respawn
+	 * recomputes the same doubled value and replaces rather than stacks.
+	 */
+	private String doubledEffectId = "";
+
+	/** All In is armed and waiting for the next bad pick to mark. */
+	private boolean doubleNextCursePending = false;
+
+	/** Debt Collector is armed and waiting for the next bad pick to force. */
+	private boolean extremeTierPending = false;
 
 	/**
 	 * Phoenix Chambered Heart's one-shot, spent for the whole run.
@@ -216,6 +280,25 @@ public class EntropyManager extends SavedData {
 	/** Also not persisted -- a pending choice cannot survive the client that was answering it. */
 	private boolean waitingOnChoice = false;
 
+	/**
+	 * The effect ids actually rolled for the pending pick, in card order.
+	 *
+	 * <p><b>Not persisted, for exactly {@link #waitingOnChoice}'s reason</b> -- a
+	 * pending offer cannot outlive the client that was answering it, and a
+	 * half-remembered one would be worse than none.
+	 *
+	 * <p>New with Twin Fate, which is the first effect that needs to know what it
+	 * was offered <em>alongside</em>. It also lets {@link #onChoiceMade} reject a
+	 * submission naming an effect that was never on the table; the real screen can
+	 * only ever send one of the three, so that is a guard against a hand-rolled
+	 * client rather than against the game.
+	 *
+	 * <p>Holds {@code roll.choices()} rather than the payload's three slots.
+	 * {@code OpenChoicePayload.fromChoices} pads a short roll by repeating a card,
+	 * and the honest list is the one the roll produced.
+	 */
+	private final List<String> pendingChoiceIds = new ArrayList<>();
+
 	public EntropyManager() {}
 
 	/** Codec constructor. */
@@ -223,8 +306,20 @@ public class EntropyManager extends SavedData {
 						   List<String> acquiredIds, List<PickRecord> history, boolean rerollUsed,
 						   String moveScramble, boolean phoenixHeartUsed, Optional<String> runState,
 						   Map<String, KeybindSnapshot> keybindSnapshots,
-						   Map<String, List<String>> companions) {
+						   Map<String, List<String>> companions,
+						   MetaRunState meta) {
 		this.companions = new CompanionRoster(companions);
+		this.rerollCharges = Math.max(0, meta.rerollCharges());
+		this.rerollsForbidden = meta.rerollsForbidden();
+		this.halfEntropyPending = meta.halfEntropyPending();
+		// An id this build no longer defines is dropped rather than carried, the same
+		// treatment an unknown id in the acquired set gets -- a doubled effect that
+		// cannot be resolved would make severityMultiplierFor compare against a
+		// string nothing can ever match.
+		this.doubledEffectId =
+				EffectRegistry.byId(meta.doubledEffectId()) != null ? meta.doubledEffectId() : "";
+		this.doubleNextCursePending = meta.doubleNextCursePending();
+		this.extremeTierPending = meta.extremeTierPending();
 		this.entropy = entropy;
 		this.pickCount = pickCount;
 		this.gameOver = gameOver;
@@ -336,8 +431,13 @@ public class EntropyManager extends SavedData {
 
 		EffectPhase phase = currentPhase();
 		Set<EffectCategory> occupied = acquired.occupiedCategories();
+		EffectRegistry.PoolOverride override = poolOverrideFor(phase);
 		EffectRegistry.RollResult roll =
-				EffectRegistry.roll(phase, entropy, random, acquired.ids(), occupied);
+				EffectRegistry.roll(phase, entropy, random, acquired.ids(), occupied, override);
+		if (override != EffectRegistry.PoolOverride.NONE) {
+			EntropyMod.LOGGER.info("Forced pool {} in effect for pick #{} -- the entropy window is "
+					+ "overridden for this pick only.", override, pickCount + 1);
+		}
 
 		if (roll.repeatFallback()) {
 			EntropyMod.LOGGER.warn(
@@ -361,14 +461,18 @@ public class EntropyManager extends SavedData {
 		}
 
 		waitingOnChoice = true;
+		pendingChoiceIds.clear();
+		for (EffectDefinition choice : choices) {
+			pendingChoiceIds.add(choice.id());
+		}
 		EntropyMod.LOGGER.info("Pick #{}: phase={} entropy={} occupied={} choices={}",
 				pickCount + 1, phase, entropy, occupied, choices);
 
 		// rerollState() is read AFTER waitingOnChoice is set and after requestReroll
 		// has already spent the reroll -- see that method for why the ordering there
 		// matters to what this sends.
-		OpenChoicePayload payload =
-				OpenChoicePayload.fromChoices(phase, entropy, entropyCap, rerollState(), choices);
+		OpenChoicePayload payload = OpenChoicePayload.fromChoices(
+				phase, entropy, entropyCap, rerollState(), rerollCharges, choices);
 		for (ServerPlayer player : PlayerLookup.all(server)) {
 			ServerPlayNetworking.send(player, payload);
 		}
@@ -383,8 +487,28 @@ public class EntropyManager extends SavedData {
 	 * send anything.
 	 */
 	public boolean isRerollAvailable() {
-		return waitingOnChoice && !rerollUsed && acquired.contains(SecondGuessBehavior.ID);
+		return waitingOnChoice && !rerollsForbidden && !rerollUsed
+				&& acquired.contains(SecondGuessBehavior.ID);
 	}
+
+	/**
+	 * True if a banked {@link #rerollCharges} can be spent right now. The
+	 * charge-based counterpart to {@link #isRerollAvailable}, and an authorisation
+	 * question in exactly the same sense -- re-checked server-side, never trusted
+	 * from the wire.
+	 */
+	public boolean isChargeRerollAvailable() {
+		return waitingOnChoice && !rerollsForbidden && rerollCharges > 0;
+	}
+
+	/** True if any reroll at all can be spent -- charge or Second Guess. */
+	public boolean isAnyRerollAvailable() {
+		return isChargeRerollAvailable() || isRerollAvailable();
+	}
+
+	public int getRerollCharges() { return rerollCharges; }
+
+	public boolean areRerollsForbidden() { return rerollsForbidden; }
 
 	/**
 	 * What the client should draw for the Second Guess button, derived from the
@@ -403,7 +527,20 @@ public class EntropyManager extends SavedData {
 	 * function of the run rather than of the moment it was asked.
 	 */
 	public RerollState rerollState() {
-		if (!acquired.contains(SecondGuessBehavior.ID)) {
+		boolean owned = acquired.contains(SecondGuessBehavior.ID);
+		// No Do-Overs first, and that ordering IS the retroactive guarantee: a charge
+		// banked before it was picked is still counted here, and still reported as
+		// forbidden rather than as spendable.
+		if (rerollsForbidden) {
+			return (owned || rerollCharges > 0) ? RerollState.FORBIDDEN : RerollState.NOT_OWNED;
+		}
+		// Charges outrank an unspent Second Guess, matching the order requestReroll
+		// spends them in. If this reported AVAILABLE while a charge was queued to be
+		// spent first, the button would name one resource and consume another.
+		if (rerollCharges > 0) {
+			return RerollState.CHARGED;
+		}
+		if (!owned) {
 			return RerollState.NOT_OWNED;
 		}
 		return rerollUsed ? RerollState.SPENT : RerollState.AVAILABLE;
@@ -431,6 +568,52 @@ public class EntropyManager extends SavedData {
 	 * @return true if new choices were sent
 	 */
 	public boolean requestReroll(MinecraftServer server) {
+		// No Do-Overs is checked before anything else, and before either resource is
+		// inspected, so it cannot be reached around by whichever one happens to be
+		// available. It is also the only branch here that can be true without a pick
+		// pending, which is why it logs rather than returning silently.
+		if (rerollsForbidden) {
+			EntropyMod.LOGGER.info("Reroll refused -- No Do-Overs forbids every reroll for the rest "
+					+ "of the run ({} charge(s) banked and unusable, Second Guess {}).",
+					rerollCharges, rerollUsed ? "already spent" : "unspent");
+			return false;
+		}
+		if (isChargeRerollAvailable()) {
+			return spendRerollCharge(server);
+		}
+		return spendSecondGuess(server);
+	}
+
+	/**
+	 * Spends one banked {@link #rerollCharges}.
+	 *
+	 * <p>Same shape and same ordering rule as {@link #spendSecondGuess}: the charge
+	 * is deducted <em>before</em> {@link #triggerPick} builds the replacement
+	 * payload, because that payload reads {@link #rerollState} and would otherwise
+	 * advertise a charge that had just been spent -- the exact bug Second Guess's
+	 * button had. Refunded if nothing opened.
+	 */
+	private boolean spendRerollCharge(MinecraftServer server) {
+		rerollCharges--;
+
+		PickTrigger result = triggerPick(server);
+		if (result != PickTrigger.OPENED) {
+			rerollCharges++;
+			EntropyMod.LOGGER.warn("Banked reroll produced no new choices ({}) -- not consumed.", result);
+			return false;
+		}
+		setDirty();
+		EntropyMod.LOGGER.info("Banked reroll spent -- pick #{} rerolled, {} charge(s) left. "
+				+ "No entropy or pick consumed.", pickCount + 1, rerollCharges);
+		return true;
+	}
+
+	/**
+	 * Second Guess's reroll, unchanged from the version that shipped -- the guard,
+	 * the spend-then-refund ordering and the delegation to {@link #triggerPick} are
+	 * all as they were. It is reached only once banked charges are exhausted.
+	 */
+	private boolean spendSecondGuess(MinecraftServer server) {
 		if (!isRerollAvailable()) {
 			return false;
 		}
@@ -454,6 +637,101 @@ public class EntropyManager extends SavedData {
 		EntropyMod.LOGGER.info("Second Guess spent -- pick #{} rerolled. No entropy or pick consumed.",
 				pickCount + 1);
 		return true;
+	}
+
+	// ------------------------------------------------------------------
+	// Meta-effect run state
+	//
+	// These are called from EffectBehavior.onAcquired, not from apply() -- apply
+	// runs again on every respawn, rejoin and dimension change, and "bank two
+	// charges" is not idempotent. onAcquired runs exactly once per run, from both
+	// acquisition paths.
+	// ------------------------------------------------------------------
+
+	/** All In: bank charges and arm the next bad pick for doubling. */
+	public void armAllIn(int charges) {
+		rerollCharges += charges;
+		doubleNextCursePending = true;
+		setDirty();
+		EntropyMod.LOGGER.info("All In armed: {} reroll charge(s) banked ({} total), and the next "
+				+ "bad pick will be drawn from the scalable pool and doubled.", charges, rerollCharges);
+	}
+
+	/** Debt Collector: force the next bad roll to the most extreme tier defined. */
+	public void armDebtCollector() {
+		extremeTierPending = true;
+		setDirty();
+		EntropyMod.LOGGER.info("Debt Collector armed: the next bad pick will be drawn from {}.",
+				EffectRegistry.extremeTier(EffectPhase.BAD));
+	}
+
+	/** No Do-Overs: end every kind of reroll, permanently and retroactively. */
+	public void forbidRerolls() {
+		rerollsForbidden = true;
+		setDirty();
+		EntropyMod.LOGGER.info("No Do-Overs: rerolls are forbidden for the rest of the run. "
+				+ "{} banked charge(s) are now unusable and are NOT refunded.", rerollCharges);
+	}
+
+	/**
+	 * Which pool override, if any, the next roll of this phase should use.
+	 *
+	 * <p><b>All In outranks Debt Collector when both are pending, and the tie-break
+	 * matters.</b> The extreme tier contains no scalable effect, so letting Debt
+	 * Collector win would silently void All In's doubling with nothing to show for
+	 * it; a Debt Collector flag that waits one more bad pick loses nothing. The rule
+	 * is "consume the flag that can still be honoured".
+	 */
+	private EffectRegistry.PoolOverride poolOverrideFor(EffectPhase phase) {
+		if (phase != EffectPhase.BAD) {
+			return EffectRegistry.PoolOverride.NONE;
+		}
+		if (doubleNextCursePending) {
+			return EffectRegistry.PoolOverride.SCALABLE_SEVERITY;
+		}
+		if (extremeTierPending) {
+			return EffectRegistry.PoolOverride.EXTREME_TIER;
+		}
+		return EffectRegistry.PoolOverride.NONE;
+	}
+
+	/**
+	 * How strongly an effect should land: {@link AllInBehavior#SEVERITY_MULTIPLIER}
+	 * for the one curse All In marked, {@code 1.0} for everything else.
+	 *
+	 * <p>Passed into every {@link EffectContext} this class builds, so it is applied
+	 * identically on a fresh pick and on every re-application after a respawn. That
+	 * is what keeps the doubling idempotent -- the amount is recomputed from
+	 * persisted state each time rather than remembered on the modifier.
+	 */
+	public double severityMultiplierFor(String effectId) {
+		return doubledEffectId.equals(effectId) ? AllInBehavior.SEVERITY_MULTIPLIER : 1.0;
+	}
+
+	/**
+	 * This run's meta state, packaged for the codec.
+	 *
+	 * <p>Built on demand rather than stored, so {@link MetaRunState} cannot become a
+	 * second copy of these fields that drifts from the ones the loop actually reads.
+	 * The fields are the truth; this is a view of them.
+	 */
+	public MetaRunState meta() {
+		return new MetaRunState(rerollCharges, rerollsForbidden, halfEntropyPending,
+				doubledEffectId, doubleNextCursePending, extremeTierPending);
+	}
+
+	/** The effect All In doubled, or {@code ""} if none. */
+	public String getDoubledEffectId() { return doubledEffectId; }
+
+	public boolean isDoubleNextCursePending() { return doubleNextCursePending; }
+
+	public boolean isExtremeTierPending() { return extremeTierPending; }
+
+	public boolean isHalfEntropyPending() { return halfEntropyPending; }
+
+	/** The ids on the cards of the pending pick, in card order. Empty if none is pending. */
+	public List<String> getPendingChoiceIds() {
+		return Collections.unmodifiableList(pendingChoiceIds);
 	}
 
 	/**
@@ -726,7 +1004,20 @@ public class EntropyManager extends SavedData {
 		}
 	}
 
-	/** Called by the server-side network receiver when a player submits their pick. */
+	/**
+	 * Called by the server-side network receiver when a player submits their pick.
+	 *
+	 * <p><b>One pick may grant several effects</b> (Twin Fate), so the body is a
+	 * loop over whatever {@link EffectBehavior#expandGrant} returns rather than a
+	 * single acquisition. Everything inside the loop -- no-repeat, the history row,
+	 * {@code apply} -- runs uniformly per granted effect, and everything that
+	 * belongs to the <em>pick</em> rather than to an effect stays outside it.
+	 *
+	 * <p><b>The pick costs exactly one entropy and one pick count regardless.</b>
+	 * Both counters move once, after the loop. That is the property the multi-grant
+	 * design rests on and it is structural rather than checked: there is no path
+	 * through this method that touches them more than once.
+	 */
 	public void onChoiceMade(MinecraftServer server, String chosenEffectId) {
 		if (!waitingOnChoice) {
 			return; // ignore stray/duplicate submissions
@@ -736,36 +1027,137 @@ public class EntropyManager extends SavedData {
 			EntropyMod.LOGGER.warn("Unknown effect id submitted: {}", chosenEffectId);
 			return;
 		}
-
-		// Record BEFORE the counters move: entropyAtPick is the number the player was
-		// looking at when they chose, and pickNumber is 1-based.
-		history.add(new PickRecord(pickCount + 1, currentPhase(), chosen.id(),
-				chosen.displayName(), chosen.description(), entropy));
-
-		boolean isNew = acquired.add(chosen.id());
-		if (!isNew) {
-			EntropyMod.LOGGER.warn("'{}' was picked again -- only reachable via the repeat fallback.",
-					chosen.id());
+		// The real screen can only ever send one of the three cards, so this guards
+		// against a hand-rolled client rather than against the game. It is possible
+		// at all only because the pending offer is now remembered -- before Twin
+		// Fate, the server kept nothing about what it had offered.
+		if (!pendingChoiceIds.isEmpty() && !pendingChoiceIds.contains(chosen.id())) {
+			EntropyMod.LOGGER.warn("'{}' was submitted but was not offered (cards were {}) -- ignored.",
+					chosen.id(), pendingChoiceIds);
+			return;
 		}
 
-		applyToAll(server, chosen, EffectContext.Reason.PICKED);
+		// Captured BEFORE anything moves: entropyAtPick is the number the player was
+		// looking at when they chose, pickNumber is 1-based, and every row this pick
+		// writes shares both.
+		int pickNumber = pickCount + 1;
+		EffectPhase phase = currentPhase();
+		int entropyAtPick = entropy;
+
+		List<String> grantedIds = EffectBehaviors.get(chosen.id())
+				.expandGrant(List.copyOf(pendingChoiceIds), chosen.id());
+
+		List<EffectDefinition> granted = new ArrayList<>();
+		for (String id : grantedIds) {
+			EffectDefinition definition = EffectRegistry.byId(id);
+			if (definition == null) {
+				EntropyMod.LOGGER.warn("expandGrant returned unknown id '{}' -- skipped.", id);
+				continue;
+			}
+			boolean isNew = acquired.add(definition.id());
+			if (!isNew) {
+				EntropyMod.LOGGER.warn("'{}' was picked again -- only reachable via the repeat fallback.",
+						definition.id());
+				// A repeat of the CHOSEN effect is the repeat fallback doing its job and
+				// still records and re-applies, exactly as before. A repeat among the
+				// EXTRA grants is a no-op: re-applying something already held would
+				// exercise -- and could therefore hide -- the idempotency guarantee the
+				// whole respawn design rests on, which is the same reason /entropygrant
+				// rejects a re-grant rather than silently re-applying.
+				if (!definition.id().equals(chosen.id())) {
+					continue;
+				}
+			}
+			history.add(new PickRecord(pickNumber, phase, definition.id(),
+					definition.displayName(), definition.description(), entropyAtPick));
+			granted.add(definition);
+		}
+
+		// Loop-level bookkeeping, before the effects land, so a meta effect acquired
+		// by this pick is armed for the NEXT one rather than for its own.
+		for (EffectDefinition definition : granted) {
+			EffectBehaviors.get(definition.id()).onAcquired(this);
+		}
+		consumePoolOverrides(phase, chosen);
+
+		for (EffectDefinition definition : granted) {
+			applyToAll(server, definition, EffectContext.Reason.PICKED);
+		}
 		// The client's view of the acquired set has to move with the server's, or a
 		// client-side effect stays inert until the next relog.
 		syncToAll(server);
 
 		// The announcement lives here, not in the behaviors: it is a statement about
 		// the RUN ("you chose this"), and behaviors also run on every respawn, where
-		// announcing would be pure spam.
-		server.getPlayerList().broadcastSystemMessage(
-				Component.literal("[Entropy] " + chosen.displayName() + " -- " + chosen.description()),
-				false);
+		// announcing would be pure spam. One line per granted effect, so a Twin Fate
+		// pick reads as the three things it actually was.
+		for (EffectDefinition definition : granted) {
+			server.getPlayerList().broadcastSystemMessage(
+					Component.literal("[Entropy] " + definition.displayName()
+							+ " -- " + definition.description()),
+					false);
+		}
 
-		entropy++;
+		entropy += entropyGainForThisPick();
 		pickCount++;
 		waitingOnChoice = false;
+		pendingChoiceIds.clear();
 		setDirty();
 
-		EntropyMod.LOGGER.info("Acquired {} effect(s): {}", acquired.size(), acquired);
+		EntropyMod.LOGGER.info("Pick #{} granted {} effect(s); entropy {} -> {}. Acquired {}: {}",
+				pickNumber, granted.size(), entropyAtPick, entropy, acquired.size(), acquired);
+	}
+
+	/**
+	 * How much entropy this pick adds: normally 1, and under Banked Entropy
+	 * alternately 0 and 1.
+	 *
+	 * <p>Half of one, expressed in integers, has to be spread over two picks -- so
+	 * the carry bit is what makes it exact rather than rounded. Over any even number
+	 * of picks the total is precisely half.
+	 *
+	 * <p>Called after the acquisition loop, so the pick that <em>takes</em> Banked
+	 * Entropy is already holding it and is itself free.
+	 */
+	private int entropyGainForThisPick() {
+		if (!acquired.contains(BankedEntropyBehavior.ID)) {
+			return 1;
+		}
+		if (halfEntropyPending) {
+			halfEntropyPending = false;
+			return 1;
+		}
+		halfEntropyPending = true;
+		return 0;
+	}
+
+	/**
+	 * Clears whichever armed pool override this pick just consumed, and records
+	 * All In's doubled curse.
+	 *
+	 * <p>Cleared here -- when the pick is <b>answered</b> -- rather than in
+	 * {@link #triggerPick} when it is rolled. That is what makes a forced pool
+	 * survive a reroll: a player who spends Second Guess or a banked charge gets
+	 * three more cards from the same forced pool instead of escaping back into the
+	 * ordinary one. It also means an interval that opens no pick does not burn the
+	 * flag.
+	 */
+	private void consumePoolOverrides(EffectPhase phase, EffectDefinition chosen) {
+		if (phase != EffectPhase.BAD) {
+			return;
+		}
+		if (doubleNextCursePending) {
+			doubleNextCursePending = false;
+			doubledEffectId = chosen.id();
+			EntropyMod.LOGGER.info("All In resolved: '{}' is doubled for the rest of the run (x{}).",
+					doubledEffectId, AllInBehavior.SEVERITY_MULTIPLIER);
+			return;
+		}
+		if (extremeTierPending) {
+			extremeTierPending = false;
+			EntropyMod.LOGGER.info("Debt Collector resolved: '{}' was drawn from the extreme tier.",
+					chosen.id());
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -817,6 +1209,11 @@ public class EntropyManager extends SavedData {
 			return GrantResult.ALREADY_ACQUIRED;
 		}
 		setDirty();
+		// The same loop-level hook onChoiceMade calls, so a granted meta effect arms
+		// itself exactly as a picked one does -- which is what makes these testable
+		// at all. It moves no run counter, so this method's "does not advance the
+		// run" guarantee is untouched.
+		EffectBehaviors.get(definition.id()).onAcquired(this);
 		applyToAll(server, definition, EffectContext.Reason.PICKED);
 		syncToAll(server);
 		// Deliberately does not log entropy/pickCount: this method's bytecode
@@ -840,7 +1237,8 @@ public class EntropyManager extends SavedData {
 						 EffectContext.Reason reason) {
 		try {
 			EffectBehaviors.get(definition.id())
-					.apply(new EffectContext(server, player, definition, reason));
+					.apply(new EffectContext(server, player, definition, reason,
+							severityMultiplierFor(definition.id())));
 		} catch (RuntimeException e) {
 			// One broken effect must not abort the loop or the join handler and leave
 			// the player with a half-applied set.

@@ -117,15 +117,21 @@ public class ChoiceScreen extends Screen {
 	private final List<Choice> choices;
 
 	/**
-	 * What the server says about Second Guess for this pick. Authoritative -- the
-	 * client never infers it, because only the server has the persisted
-	 * {@code rerollUsed} flag.
+	 * What the server says about rerolling for this pick. Authoritative -- the
+	 * client never infers it, because only the server holds the persisted
+	 * {@code rerollUsed} flag, the banked charge count and No Do-Overs' ban.
 	 */
 	private final RerollState rerollState;
 
 	/**
+	 * Banked charges, for the button's label. Meaningful only when
+	 * {@link #rerollState} is {@code CHARGED}; 0 otherwise.
+	 */
+	private final int rerollCharges;
+
+	/**
 	 * Non-null whenever {@link #rerollState} is not {@code NOT_OWNED}. Created
-	 * inactive for {@code SPENT}, and deactivated on click for {@code AVAILABLE}.
+	 * inactive for the two dead states, and deactivated on click for the live ones.
 	 */
 	private Button rerollButton;
 
@@ -148,11 +154,12 @@ public class ChoiceScreen extends Screen {
 						 String id1, String name1, String desc1,
 						 String id2, String name2, String desc2,
 						 String id3, String name3, String desc3) {
-		this(phase, entropy, EntropyManager.DEFAULT_ENTROPY_CAP, RerollState.NOT_OWNED,
+		this(phase, entropy, EntropyManager.DEFAULT_ENTROPY_CAP, RerollState.NOT_OWNED, 0,
 				id1, name1, desc1, id2, name2, desc2, id3, name3, desc3);
 	}
 
 	public ChoiceScreen(EffectPhase phase, int entropy, int entropyCap, RerollState rerollState,
+						 int rerollCharges,
 						 String id1, String name1, String desc1,
 						 String id2, String name2, String desc2,
 						 String id3, String name3, String desc3) {
@@ -161,6 +168,7 @@ public class ChoiceScreen extends Screen {
 		this.entropy = entropy;
 		this.entropyCap = entropyCap;
 		this.rerollState = rerollState;
+		this.rerollCharges = rerollCharges;
 		this.choices = List.of(
 				new Choice(id1, name1, desc1),
 				new Choice(id2, name2, desc2),
@@ -254,13 +262,10 @@ public class ChoiceScreen extends Screen {
 		}
 
 		if (rerollState != RerollState.NOT_OWNED) {
-			boolean spent = rerollState == RerollState.SPENT;
 			int buttonWidth = Math.min(REROLL_BUTTON_MAX_WIDTH,
 					Math.max(REROLL_BUTTON_MIN_WIDTH, this.width - 2 * SCREEN_MARGIN));
 			this.rerollButton = Button.builder(
-							Component.literal(spent
-									? "Second Guess — already used"
-									: "Second Guess — reroll these options"),
+							Component.literal(rerollButtonLabel(rerollState, rerollCharges)),
 							button -> onReroll())
 					.bounds(this.width / 2 - buttonWidth / 2,
 							panelsTop + panelsBlock + REROLL_GAP,
@@ -270,13 +275,53 @@ public class ChoiceScreen extends Screen {
 			// clicks are dropped by Button itself rather than by onReroll. Both the
 			// wording and the colour change, so "gone" reads at a glance and also
 			// survives a colourblind player.
-			this.rerollButton.active = !spent;
+			this.rerollButton.active = isRerollLive(rerollState);
 			this.addRenderableWidget(this.rerollButton);
 		}
 	}
 
 	/**
-	 * Spends Second Guess. The screen deliberately stays open: the server answers
+	 * Whether the button can be clicked. {@code SPENT} and {@code FORBIDDEN} are
+	 * both dead but for different reasons, and both still <b>reserve their space</b>
+	 * and stay on screen greyed -- a player whose reroll silently vanished would
+	 * read it as the effect having stopped existing, which is the whole reason
+	 * {@link RerollState} is an enum rather than a boolean.
+	 */
+	private static boolean isRerollLive(RerollState state) {
+		return state == RerollState.AVAILABLE || state == RerollState.CHARGED;
+	}
+
+	/**
+	 * The label, which is the one place the player learns <em>which</em> resource a
+	 * click will spend.
+	 *
+	 * <p>{@code CHARGED} names the count because the server spends banked charges
+	 * before Second Guess -- so while any remain, a button saying "Second Guess"
+	 * would name one resource and consume another. Once they run out the same
+	 * button goes back to naming Second Guess, which is exactly when it starts
+	 * being true again.
+	 *
+	 * <p>Package-private and static so the harness can drive it; it is pure string
+	 * logic with no Minecraft types.
+	 */
+	static String rerollButtonLabel(RerollState state, int charges) {
+		return switch (state) {
+			case AVAILABLE -> "Second Guess — reroll these options";
+			case CHARGED -> charges == 1
+					? "Reroll these options (1 banked)"
+					: "Reroll these options (" + charges + " banked)";
+			case SPENT -> "Second Guess — already used";
+			case FORBIDDEN -> "No Do-Overs — rerolling is forbidden";
+			case NOT_OWNED -> "";
+		};
+	}
+
+	/**
+	 * Spends a reroll -- a banked charge if any remain, otherwise Second Guess.
+	 * <b>Which one is the server's decision</b>, not this screen's; the payload
+	 * carries no resource and the button's label is the only thing that differs.
+	 *
+	 * <p>The screen deliberately stays open: the server answers
 	 * with a fresh {@code OpenChoicePayload} which replaces it, and if the reroll is
 	 * refused for any reason the player keeps the pick they already had rather than
 	 * being stranded with no screen and a pending choice.

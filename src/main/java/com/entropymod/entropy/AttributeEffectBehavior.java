@@ -94,8 +94,25 @@ public abstract class AttributeEffectBehavior implements EffectBehavior {
 		return changes;
 	}
 
+	/**
+	 * Applies every {@link Change}, scaled by {@link EffectContext#severityMultiplier()}.
+	 *
+	 * <p><b>The multiplier is the whole of All In's "doubled severity", and it lives
+	 * here on purpose</b>: this one multiplication covers every attribute curse in
+	 * the registry with no per-effect code, which is exactly why All In's pool is
+	 * restricted to attribute-driven effects. See
+	 * {@code EffectRegistry.SCALABLE_SEVERITY_IDS} for the subset and for why the
+	 * hook-driven curses have no equivalent operation.
+	 *
+	 * <p>It does not weaken the idempotency guarantee. The multiplier comes from
+	 * persisted run state, so every re-application after a respawn or rejoin
+	 * computes the same amount, and {@code addOrUpdateTransientModifier} replaces a
+	 * modifier keyed on the same {@code Identifier} rather than adding a second one.
+	 * Applying ten times at 2.0 leaves one doubled modifier, not ten.
+	 */
 	@Override
 	public void apply(EffectContext ctx) {
+		double severity = ctx.severityMultiplier();
 		for (Change change : changes) {
 			AttributeInstance instance = ctx.target().getAttribute(change.attribute());
 			if (instance == null) {
@@ -108,7 +125,7 @@ public abstract class AttributeEffectBehavior implements EffectBehavior {
 			}
 			// addOrUpdate, NOT add -- see the class javadoc. This is the idempotency.
 			instance.addOrUpdateTransientModifier(new AttributeModifier(
-					modifierId(ctx.effect().id()), change.amount(), change.operation()));
+					modifierId(ctx.effect().id()), change.amount() * severity, change.operation()));
 		}
 		afterApply(ctx);
 	}

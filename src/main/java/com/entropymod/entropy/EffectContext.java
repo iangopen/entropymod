@@ -36,12 +36,20 @@ public final class EffectContext {
 	private final ServerPlayer target;
 	private final EffectDefinition effect;
 	private final Reason reason;
+	private final double severityMultiplier;
 
+	/** Ordinary severity -- what every effect gets unless All In has marked this one. */
 	public EffectContext(MinecraftServer server, ServerPlayer target, EffectDefinition effect, Reason reason) {
+		this(server, target, effect, reason, 1.0);
+	}
+
+	public EffectContext(MinecraftServer server, ServerPlayer target, EffectDefinition effect, Reason reason,
+						 double severityMultiplier) {
 		this.server = server;
 		this.target = target;
 		this.effect = effect;
 		this.reason = reason;
+		this.severityMultiplier = severityMultiplier;
 	}
 
 	public MinecraftServer server() {
@@ -60,6 +68,26 @@ public final class EffectContext {
 
 	public Reason reason() {
 		return reason;
+	}
+
+	/**
+	 * How much stronger than normal this effect should land -- {@code 1.0} for
+	 * everything except the one curse All In has doubled.
+	 *
+	 * <p><b>Computed by {@code EntropyManager} and passed in, rather than looked up
+	 * here.</b> That is what keeps this class a plain carrier with no reach into run
+	 * state, and it is what lets every existing harness call site keep using the
+	 * four-argument constructor unchanged -- CLAUDE.md's "adding a field here is
+	 * cheap" extension point working as advertised.
+	 *
+	 * <p>Read by {@link AttributeEffectBehavior#apply}, which multiplies every
+	 * {@code Change} amount by it. Idempotency is unaffected: the multiplier is
+	 * derived from persisted run state, so re-application after a respawn produces
+	 * the same amount and {@code addOrUpdateTransientModifier} replaces rather than
+	 * stacks, exactly as at 1.0.
+	 */
+	public double severityMultiplier() {
+		return severityMultiplier;
 	}
 
 	/** True on a fresh pick, false when re-establishing an effect after respawn/rejoin. */

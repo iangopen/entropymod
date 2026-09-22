@@ -5650,3 +5650,358 @@ see those classes at all. The shipped checks read **the client mixin config and 
 text from disk**, and every such assertion is prefixed `[source-text]` so it is obvious which claims
 rest on bytecode and which do not. **Do not let an unlabelled source-text check pass for a bytecode
 one** — it can only catch a rename, never a wrong injection target.
+
+---
+
+### The Tier 2 META batch — five effects that change the PICK LOOP, not the player
+Registry is now **72 effects (34 GOOD / 38 BAD)**. Banked Entropy, Twin Fate (GOOD),
+All In, Debt Collector, No Do-Overs (BAD). Findings 1bi-1bs. **This is the reference
+entry for any future meta effect**, because it is where the shared infrastructure
+lives: two new hooks on `EffectBehavior`, a remembered pending offer, a pool
+override, a severity multiplier, and a nested persistence record.
+
+**Every effect before this one was a function of the PLAYER.** These are functions
+of the loop — what is offered, what a pick costs, how many effects it grants, what
+a reroll is allowed to do. That is a different kind of thing and it needed
+different extension points; the alternative was a central switch on effect id in
+`EntropyManager`, which is exactly the fourth-file edit CLAUDE.md names as the
+signal that an abstraction is missing.
+
+#### 1bi. ⚑ TWO DEFAULT METHODS ON `EffectBehavior` ARE THE WHOLE EXTENSION POINT
+Both default to doing nothing, so **every effect written before them is
+byte-for-byte unaffected** and "adding an effect is exactly three things" still
+holds. The harness asserts the default for all 71 other effects individually.
+
+| hook | called from | answers |
+|---|---|---|
+| `expandGrant(offeredIds, chosenId)` | `onChoiceMade`, **before** anything is acquired | "one card was clicked — which effects does this pick grant?" |
+| `onAcquired(EntropyManager)` | `onChoiceMade` **and** `grantEffect` | "this effect just joined the run — arm whatever it arms" |
+
+**`onAcquired` is NOT `apply`, and the distinction is load-bearing.** `apply` runs
+again on every respawn, rejoin and dimension change; "bank two reroll charges" is
+not idempotent and would hand out two more per death. `onAcquired` runs **exactly
+once per effect per run**, from both acquisition paths — including
+`/entropygrant`, which is what makes these testable at all.
+
+`expandGrant` running *before* acquisition is what keeps a multi-grant from needing
+special cases downstream: no-repeat, anti-stacking, the history rows and `apply`
+all then run **uniformly over a list** rather than over one effect plus a
+bolted-on extra.
+
+#### 1bj. ⚑ THE SERVER KEPT NOTHING ABOUT THE PENDING OFFER — Twin Fate needed it built
+`triggerPick` built `choices`, sent them, and dropped them. So `onChoiceMade` knew
+*what was clicked* and had no idea *what it was clicked instead of*. Twin Fate is
+the first effect that needs the latter, and there was nothing to read.
+
+`pendingChoiceIds` is **not persisted**, for exactly `waitingOnChoice`'s reason — a
+pending offer cannot outlive the client answering it, and a half-remembered one is
+worse than none. It holds **`roll.choices()`, not the payload's three slots**:
+`OpenChoicePayload.fromChoices` pads a short roll by repeating a card, and the
+honest list is the one the roll produced. A partial result (1 or 2 cards) is a
+normal outcome, so Twin Fate degrades to granting two, one, or only itself rather
+than treating it as an error.
+
+**Free side effect worth keeping:** `onChoiceMade` can now reject a submission
+naming an effect that was never offered. The real screen can only send one of the
+three, so it guards against a hand-rolled client rather than against the game — but
+it was previously impossible to check at all.
+
+#### 1bk. ⚑ HISTORY FOR A MULTI-GRANT: ONE ROW PER EFFECT, NOT ONE ROW PER CLICK
+The choice was between one row naming several effects and several rows sharing a
+pick. **Several rows, and the deciding argument is `PickRecord`'s own javadoc** —
+history records *what the player actually saw*, which is why name and description
+are stored as strings rather than as an id reference. A Twin Fate pick is three
+effects the player now holds; a single row would make "do I have X" unanswerable
+by scanning history, which is the one thing it is for.
+
+Stated as a rule it is not a Twin Fate carve-out at all: **one `PickRecord` per
+effect added to the acquired set, all rows sharing that pick's `pickNumber` and
+`entropyAtPick`.** Twin Fate gets a row too, because it is acquired too — so
+history shows both the click and the outcome.
+
+**Twin Fate IS acquired**, which is what subjects it to no-repeat like everything
+else. Exempting it would have made it the only effect in the registry outside the
+project's hard rule. The cost is that it occupies META for anti-stacking.
+
+**The pick costs exactly 1 entropy and 1 pick count, however many effects it
+grants.** Both counters move once, after the loop, and no path through
+`onChoiceMade` touches them twice. The entropy step is its own named method
+(`entropyGainForThisPick`) partly so that is inspectable.
+
+**One case the loop must get right:** a repeat of the *chosen* effect is the repeat
+fallback doing its job and still records and re-applies, exactly as before. A
+repeat among the *extra* grants is skipped — re-applying something already held
+would exercise, and could therefore hide, the idempotency guarantee the whole
+respawn design rests on. Same reasoning as `/entropygrant` rejecting a re-grant.
+
+#### 1bl. ⚑ "DOUBLED SEVERITY" HAS NO GENERIC MEANING — the real subset is EIGHT of thirty-five
+All In's brief asked which BAD effects can be cleanly scaled. The investigation's
+answer is small, and the shortness is the finding.
+
+The rule is mechanical and has three parts: the effect must be an
+`AttributeEffectBehavior` (so "twice as severe" is literally `amount * 2` with no
+per-effect code), **and** every one of its `Change`s must be unambiguously a
+penalty, **and** the doubled value must not land on a clamp that makes it
+degenerate. `EffectRegistry.SCALABLE_SEVERITY_IDS`, with the per-member clamp table:
+
+| effect | attribute | 1x → 2x | result at 2x |
+|---|---|---|---|
+| heavy_boots | MOVEMENT_SPEED | −0.15 → −0.30 | 0.1 → 0.07 (4.32 → 3.02 b/s) |
+| brittle_bones | MAX_HEALTH | −4.0 → −8.0 | 20 → 12, six hearts; floor 1.0 |
+| weak_grip | ATTACK_DAMAGE | −2.0 → −4.0 | iron sword 6.0 → 2.0 ⚑ |
+| sluggish_strikes | ATTACK_SPEED | −0.20 → −0.40 | 4.0 → 2.4; floor 0.0 unreached |
+| glass_jaw | FALL_DAMAGE_MULTIPLIER | +0.40 → +0.80 | 1.0 → 1.8 |
+| dull_blade | BLOCK_BREAK_SPEED | −0.20 → −0.40 | 1.0 → 0.6 |
+| leaden_legs | GRAVITY | +0.40 → +0.80 | 0.08 → 0.144; max 1.0 ⚑ |
+| stone_feet | JUMP_STRENGTH | −0.40 → −0.80 | 0.42 → 0.084 ⚑ |
+
+**Excluded, each for a stated reason rather than by omission:**
+
+- **`unlucky`** — mechanically fine (`LUCK`'s floor is −1024), but −4 against −2 is
+  a loot-weighting shift no player can observe. The perceptual-threshold failure
+  this project has hit four times; a doubled severity nobody can feel reads as
+  broken.
+- **`giant_size`, `human_machinegun`** — attribute-driven but **mixed valence**.
+  Doubling also doubles Giant Size's +10 hearts, −25% damage taken and +6.5 reach,
+  and Human Machinegun's +90% attack speed. "Twice as severe" would make both
+  *better*.
+- **all 24 hook-driven curses** — their magnitude is a `static final` read by a
+  mixin or a tick service, not a modifier amount, so there is **no generic doubling
+  operation at all**: only twenty-four separate decisions. And several have no
+  meaningful 2x even then — `exposed`'s 1.25 is already at its saturation point,
+  `clumsy_digger`'s chance saturates at 2x wear, `blight_touched` is already *every*
+  crop, and `loose_footing`/`nightmares`/`flamboyant`/`upside_down_camera`/
+  `randomized_controls` are booleans that are already total.
+
+⚑ **Three flagged members.** Doubled `stone_feet` leaves a jump apex near 0.06
+blocks and doubled `leaden_legs` near 0.70 — neither clears anything, and the world
+stays traversable only because `STEP_HEIGHT` is untouched at 0.6 so slabs and
+stairs auto-step. Doubled `weak_grip` is **invisible bare-handed**, because the 1x
+value already clamps that case to 0.0; the harness asserts that as the one named
+exception rather than excusing it, and separately asserts the penalty IS observable
+with a weapon fitted.
+
+**The set lives in `EffectRegistry`, not in `AllInBehavior`**, and that is a
+layering decision rather than taste: it is metadata *about registry entries*, and
+`EffectRegistry` is deliberately free of Minecraft imports. Reaching into the
+behavior package for it would pull `EffectContext` — and therefore
+`MinecraftServer` — into the one file the headless harness drives everything from.
+
+#### 1bm. The doubling is ONE multiplication, and idempotency survives it unchanged
+`EffectContext` gained a `severityMultiplier()`, computed by `EntropyManager` and
+passed in; `AttributeEffectBehavior.apply` multiplies every `Change` amount by it.
+**One line covers every attribute curse in the registry**, which is precisely why
+All In's pool is restricted to attribute-driven effects.
+
+**It does not weaken the idempotency guarantee, and the reason is where the value
+lives.** The multiplier is derived from persisted run state (`doubledEffectId`)
+rather than remembered on the modifier, so every re-application after a respawn or
+relog recomputes the same amount and `addOrUpdateTransientModifier` replaces by
+`Identifier` exactly as it does at 1.0. Driven against real `AttributeInstance`s:
+ten applications at 2.0 leave one modifier holding the doubled amount, equal to
+what one application produces.
+
+The four-argument `EffectContext` constructor delegates to a five-argument one with
+`1.0`, so **every existing call site — including every harness one — is
+untouched**. CLAUDE.md's "adding a field here is cheap" extension point working as
+advertised.
+
+#### 1bn. ⚑ A FORCED POOL MUST IGNORE THE ENTROPY WINDOW, OR ALL IN SILENTLY DOES NOTHING
+`EffectRegistry.PoolOverride` replaces the eligibility step for one roll:
+`SCALABLE_SEVERITY` (All In) and `EXTREME_TIER` (Debt Collector). **Both ignore
+`eligibleAt` entirely, and for All In that is load-bearing rather than incidental**
+— every member of the scalable subset is a Tier 1 curse capped at entropy 25, while
+All In itself cannot be offered below 25. Honouring the window would leave the
+forced pool permanently empty and the effect would do nothing, with nothing logged.
+
+**The override narrows the pool; it does not suspend the rules.** No-repeat and
+anti-stacking still run on the result in the usual priority order with the usual
+fallbacks — asserted by draining the extreme tier and checking the repeat fallback
+still fires. The five-argument `roll` is retained and is exactly
+`PoolOverride.NONE`, asserted by seeding two identical `Random`s.
+
+**`extremeTier(phase)` is DERIVED, not listed**: the highest `minEntropy` any
+effect of that phase has, and everything sitting at it. For BAD today that is
+entropy 40 — Unstable and Earthquake, plus Debt Collector itself, which no-repeat
+removes. When Tier 3 lands the target moves with it and no constant goes stale.
+
+**The flags are cleared when the marked pick is ANSWERED, not when it is rolled.**
+That is what makes a forced pool survive a reroll: a player who spends Second Guess
+or a banked charge gets three more cards from the same forced pool instead of
+escaping back into the ordinary one. It also means an interval that opens no pick
+does not burn the flag.
+
+**Tie-break: All In outranks Debt Collector when both are armed**, and the reason is
+asserted rather than merely ordered — the extreme tier contains no scalable effect,
+so letting Debt Collector win would silently void All In's doubling with nothing to
+show for it, whereas a Debt Collector flag that waits one more bad pick loses
+nothing. The rule is "consume the flag that can still be honoured".
+
+#### 1bo. RerollCharges are a SEPARATE resource, and the ban must be a CHECK not a reset
+`rerollUsed` is untouched. `rerollCharges` is a new counter that exists whether or
+not the player has ever held Second Guess; `requestReroll` became a three-line
+dispatcher (`forbidden?` → `charges > 0?` → the original Second Guess body, which
+is reached verbatim once charges run out and keeps its own guard, its
+spend-then-refund ordering and its single `triggerPick` delegation).
+
+**Charges are spent first, and `rerollState` reports `CHARGED` while any remain —
+the two orderings must match.** A button labelled "Second Guess" that quietly
+consumed a charge would name one resource and consume another. Once charges hit 0
+the same button goes back to naming Second Guess, which is exactly when it becomes
+true again. `RerollState` grew from three constants to five (`CHARGED`,
+`FORBIDDEN`); it is sent by name, so the new constants needed no codec change.
+
+**No Do-Overs is checked FIRST in both `rerollState` and `requestReroll`, and that
+ordering IS the retroactive guarantee.** Charges banked before it was picked are
+left in place and made unreachable — **not refunded, not decremented, not zeroed**.
+Draining the counter would look equivalent and would destroy the run's ability to
+tell "never had charges" from "had them taken", which is the exact distinction
+`RerollState` exists to preserve on the Second Guess side. A run with nothing to
+lose still shows no button at all.
+
+Both charge-spending halves repeat Second Guess's ordering lesson: **the charge is
+deducted before `triggerPick` builds the replacement payload**, because that
+payload reads `rerollState`, and refunded if nothing opened.
+
+`OpenChoicePayload` gained an `int rerollCharges` alongside the enum: the state
+answers "which button do I draw", the count answers "what does its label say", and
+an enum cannot carry a number. It is now **three adjacent ints** on that payload,
+which is why the round-trip check is field by field with distinct values — 37/91/5
+swapped in a way that cancels would pass a record `equals`.
+
+#### 1bp. ⚑ BANKED ENTROPY: no-repeat makes a "second pick of the same effect" UNREACHABLE
+The proposed design was "the first Banked Entropy pick adds 0 and sets a flag; a
+second adds 1 and clears it", so two half-points sum to one integer. **It cannot
+work, and the reason is a rule this project already has.** No-repeat is hard: an
+effect picked once is removed from the pool for the rest of the run, so there is no
+second Banked Entropy pick. The clearing branch is unreachable, the flag is set
+forever and never read again, and what ships is "this one pick was free" with a
+dead boolean persisted beside it.
+
+**The fix is to consult the flag on EVERY pick once the effect is held** — flag
+clear means +0 and set it, flag set means +1 and clear it. The arithmetic is
+unchanged (still 0.5 + 0.5 with integers, no representation change); only *which*
+picks participate. Net, exactly +1 per two picks, asserted at every even step over
+20 picks rather than only at the end, so a carry that drifted and re-converged
+could not hide.
+
+The pick that *takes* the effect is itself free: by the time `onChoiceMade` reaches
+the entropy step the id is already in `AcquiredEffects`.
+
+> **The general rule: before designing a mechanic around "pick it again", check
+> whether no-repeat permits a second pick. It does not.** This is the second time
+> a design has assumed re-acquisition was reachable — and note Second Guess's
+> "once" rests on a run flag for the *mirror-image* reason, that the repeat fallback
+> **can** re-offer an already-taken effect once a phase's pool empties. **Neither
+> direction can be assumed: no-repeat is not a guarantee that something recurs, and
+> it is not a guarantee that it cannot.**
+
+#### 1bq. ⚑ `RecordCodecBuilder.group()` TOPS OUT AT 16 FIELDS — and the run codec was at 13
+Six more flat `optionalFieldOf` entries would not compile, and the failure is at
+the API's edge rather than anywhere obvious. `MetaRunState` is the fix: one nested
+record carrying all six, added as a single field.
+
+**Every field is still `optionalFieldOf` with a default, and the whole record is
+optional too**, defaulting to `MetaRunState.EMPTY`. That keeps the usual guarantee
+in both directions — a save written before it existed has no `meta` key and loads
+as a run holding no meta effects, which is exactly what it is; and a seventh flag
+can be added inside the same safe way. It is built **on demand** by
+`EntropyManager.meta()` rather than stored, so it cannot become a second copy of
+the fields the loop actually reads.
+
+Minecraft-import-free like `PickRecord`, so the harness round-trips it with no
+bootstrap. Five of its six fields are booleans, which is exactly why that check is
+field by field: a whole-record `equals` would pass on any pair of them swapped.
+
+A doubled effect id the build no longer defines is **dropped on load**, the same
+treatment an unknown id in the acquired set gets — otherwise `severityMultiplierFor`
+would compare forever against a string nothing can match.
+
+#### 1br. ⚑ HARNESS: `grantEffect` NOW CLASS-INITS EVERY BEHAVIOR, SO BOOTSTRAP MUST COME FIRST
+`HarnessBootstrap.init()` used to be called by the sections that needed registry
+access. `onAcquired` broke that: `grantEffect` now touches `EffectBehaviors`, which
+class-inits every behavior, which class-inits `Attributes`, which touches
+`BuiltInRegistries`. Reaching it before `Bootstrap.bootStrap()` **poisons
+`BuiltInRegistries`' `<clinit>` with "Not bootstrapped" for the whole JVM**, and
+every later section then fails with `NoClassDefFoundError` far from the cause.
+`init()` is now the first line of `main()`; it is idempotent, so the sections that
+call it themselves are unaffected.
+
+**Also worth having: `Attribute` has no `toString` override.** A first draft of the
+all-penalty check read `change.attribute().value().toString()`, matched
+`"RangedAttribute@4a8e6e89"` against nothing, and passed vacuously for the two
+attributes where *higher* is worse. Compare the `Holder` against
+`Attributes.GRAVITY` / `Attributes.FALL_DAMAGE_MULTIPLIER` directly — sign alone
+cannot answer "is this a penalty", since +0.40 fall damage is one and +0.15
+movement speed is not.
+
+#### 1bs. All five are META, and anti-stacking makes them near-mutually-exclusive
+Stated as a known consequence rather than discovered later. `EffectCategory` has
+nine values and they are a locked Part 2 invariant; META is semantically correct for
+all five. But anti-stacking excludes a whole category once occupied, so holding any
+one of these — **or Second Guess, Fast Learner or Slow Learner** — keeps the rest
+out of the roll for the phase they share.
+
+Anti-stacking is a **soft** rule, dropped first when the pool empties, so
+collisions are reachable. In ordinary play they are close to mutually exclusive,
+which means **All In banking charges for No Do-Overs to forbid will rarely assemble
+by rolling.** `/entropygrant` is the supported way to test them together; it
+bypasses the roll entirely while remaining the real acquisition path, and
+`onAcquired` firing from it is what makes that work.
+
+The two fixes both change locked design (a tenth category, or a category
+exemption), so neither was taken unilaterally. **Open for a future session.**
+
+#### Entropy windows, and the content gap one of them is drawn around
+| effect | window | why |
+|---|---|---|
+| Banked Entropy | **45-60** | halving entropy gain doubles the *remaining* run, so it is worth far more at 10 than at 55. Late enough that it can extend a run's tail, never double the whole of one |
+| Twin Fate | **40-50** | above the whole Tier 2 mass, so never an early- or mid-run option |
+| All In | 25-50 | ordinary Tier 2; the doubled curse it marks is always a Tier 1 attribute curse |
+| Debt Collector | **40-60** | forced, not chosen — see below |
+| No Do-Overs | 25-55 | it removes a safety net and does nothing to the player |
+
+**Debt Collector's window and its flag are both forced.** The extreme BAD tier is
+Unstable and Earthquake, *both* `counterplay = false`, so an effect whose content is
+"you will be handed one of those" cannot honestly be labelled survivable — that is
+labelling the delivery rather than the thing delivered, the failure this project has
+hit three times. And CLAUDE.md Part 2 forbids a `counterplay = false` effect below
+entropy 40. The harness's `falseCount` check moved 2 → 3 and still asserts every one
+sits at 40-60.
+
+**Twin Fate's ceiling is drawn around a pre-existing content gap**, not around Twin
+Fate: **above entropy 50 the GOOD pool collapses to Glass Cannon Pact alone, and
+above 60 it is empty** (`NO_ELIGIBLE_EFFECTS`). A Twin Fate at 55 would be one card
+of two — the default, not a highlight.
+
+**And the structural note behind all of these: `EffectRegistry` has no rarity
+weight.** The roll is a uniform shuffle of the eligible pool, so **narrowing a
+window makes an effect rarer across a run but MORE likely per pick inside its
+band.** The window is the only lever available. It genuinely delivers "never in the
+first half of a run"; it cannot deliver "occasionally, even when eligible". If that
+is ever wanted, it is a weight on `EffectDefinition`, not a narrower range.
+
+#### Human Machinegun retuned to −0.60 alongside this batch
+`ATTACK_DAMAGE_PENALTY` −0.75 → **−0.60**, i.e. damage ×0.25 → **×0.40**. Attack
+speed is untouched at +0.90 (×1.90), so **net DPS is ×0.76 uniformly**.
+
+| | speed norm→cursed | cooldown | damage norm→cursed | DPS norm→cursed |
+|---|---|---|---|---|
+| bare hand | 4.00 → **7.60**/s | 5.00 → **2.63** t | 1.0 → **0.40** | 4.00 → **3.04** |
+| iron sword | 1.60 → **3.04**/s | 12.50 → **6.58** t | 6.0 → **2.40** | 9.60 → **7.30** |
+| netherite axe | 1.00 → **1.90**/s | 20.00 → **10.53** t | 10.0 → **4.00** | 10.00 → **7.60** |
+
+**The retune is much larger than the input constant suggests**, which is the part
+worth recording: the damage *factor* rose by 60% of itself, so the DPS penalty went
+from **−52.5% to −24%**. It stays BAD, but the phase now rests on a quarter of the
+player's damage output rather than on more than half of it, and it is the mildest
+damage curse in the registry. The lever if it reads as doing nothing is
+`ATTACK_DAMAGE_PENALTY` alone; the two factors are independent terms in one product.
+
+Three corrections shipped with it, each a stale statement rather than a bug:
+the description said "a quarter as much" and now says two fifths (a card that
+outlives its constant is the 1k/1q/1s failure in miniature); the javadoc table's
+bare-hand cooldown said `20 → 2.63` where normal is **5.00**; and the Glass Cannon
+Pact composition line read `(6.0 + 0.5) × 0.25 = 1.625`, which contradicts **1bb**
+in the same file — the `BASE` term is +50% of the weapon-inclusive total, so an iron
+sword under both is `(1.0 + 5.0) × 1.5 × 0.40 = 3.60`.
