@@ -1,0 +1,21 @@
+# Gradle / Loom
+.gradle/
+build/
+out/
+classes/
+
+# Minecraft dev runtime (runClient / runServer)
+run/
+logs/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+bin/
+
+# OS
+.DS_Store
+Thumbs.db
