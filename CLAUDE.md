@@ -13,6 +13,37 @@ cap (default 100).
 
 ---
 
+## Repository state (verified 2026-11-02)
+
+- **History rewritten 2026-11-02.** Committed `build/`, `run/`, `.gradle/`, `.idea/` and `logs/` were
+  removed from every commit with `git filter-repo`, and the result was force-pushed with per-branch leases,
+  atomically. All 64 commits and 31 branches were kept, with authors and dates intact. Every commit hash changed.
+  A fresh clone is about 1.2 MiB (it was 196 MB) and passes `git fsck --full`. `.gitignore` (on `main`) keeps
+  build, run and IDE output out from now on.
+- **The repo is clean.** No secrets, keys, personal paths or build output in history (scanned before the push).
+  Dependabot alerts, secret scanning and push protection are on.
+- **Any clone made before 2026-11-02 is old history. Don't push from it, and don't pull it into a new clone.**
+  Re-clone instead. The old local clone is `C:\devwork\github projects\entropymod-old`, with its push URL disabled.
+- **`main` is behind the feature branches.** The newest work is on `run-lifecycle-ended`, which also has a
+  newer copy of this file. Still open: merging the lineage into `main`, bringing `.gitignore` onto
+  `run-lifecycle-ended`, and rewriting the README.
+- PR #1 (Spagles) was closed by the rewrite. Its 3 commits are saved as patches in
+  `C:\devwork\backups\entropymod-2026-10-25\pr1-spagles-patches\` (apply with `git am -3`).
+
+### Restoring the old history (only if something was lost)
+The pre-rewrite history (all 31 branches, original SHAs) is in
+`C:\devwork\backups\entropymod-2026-10-25\entropymod-all.bundle`, SHA-256 `688213ae…f2e3`. A copy is on Google
+Drive. The backup's `README.md` has the full restore steps. In short:
+```powershell
+git bundle verify C:\devwork\backups\entropymod-2026-10-25\entropymod-all.bundle   # run inside any repo
+git -c core.longpaths=true clone C:\devwork\backups\entropymod-2026-10-25\entropymod-all.bundle C:\devwork\entropymod-restored
+```
+Untracked work from before the rewrite (world saves, logs) is in that folder's `uncommitted\`. The command that
+puts GitHub back to its pre-rewrite state is in `C:\devwork\portfolio-audit\ENTROPY-PUSH-PLAN.md` §5, run from
+`C:\devwork\entropymod-rollback.git`.
+
+---
+
 ## Part 0: Mapping migration note (read this first if anything won't compile)
 
 This project's Loom setup uses **Mojang's official mappings**, not Yarn.
