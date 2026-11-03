@@ -2,19 +2,33 @@ package com.entropymod.client;
 
 import com.entropymod.EntropyMod;
 import com.entropymod.client.gui.ChoiceScreen;
+import com.entropymod.client.gui.EndScreen;
+import com.entropymod.client.gui.StartScreen;
 import com.entropymod.entropy.EffectPhase;
+import com.entropymod.entropy.RerollState;
 import com.entropymod.entropy.EntropyManager;
+import com.entropymod.entropy.RunState;
+import com.entropymod.network.ClientEffectsPayload;
+import com.entropymod.network.TremorLockPayload;
+import com.entropymod.network.HistoryRequestPayload;
+import com.entropymod.network.HistoryResponsePayload;
+import com.entropymod.network.KeybindSnapshotPayload;
 import com.entropymod.network.OpenChoicePayload;
+import com.entropymod.network.RunEndPayload;
+import com.entropymod.network.RunSyncPayload;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
 
 import java.util.Locale;
 
@@ -36,11 +50,152 @@ public class EntropyModClient implements ClientModInitializer {
 			// feeds the persistent HUD as well as the screen.
 			EntropyHud.update(payload.phase(), payload.entropy(), payload.entropyCap());
 			context.client().setScreen(new ChoiceScreen(
-					payload.phase(), payload.entropy(), payload.entropyCap(),
+					payload.phase(), payload.entropy(), payload.entropyCap(), payload.rerollState(),
+					payload.rerollCharges(),
 					payload.choice1().id(), payload.choice1().name(), payload.choice1().description(),
 					payload.choice2().id(), payload.choice2().name(), payload.choice2().description(),
 					payload.choice3().id(), payload.choice3().name(), payload.choice3().description()
 			));
+		});
+
+		// Which effects the run holds. Required by every client-side effect --
+		// nothing before Tier 2 needed it, so the client was never told. Arrives on
+		// join and after any acquisition, so a granted effect takes hold at once
+		// rather than waiting for the next pick.
+		ClientPlayNetworking.registerGlobalReceiver(ClientEffectsPayload.TYPE, (payload, context) -> {
+			ClientRunState.update(payload.effectIds(), payload.moveScramble());
+			EntropyMod.LOGGER.info("Client effects synced: {} effect(s), scramble '{}'",
+					payload.effectIds().size(), payload.moveScramble());
+		});
+
+		// Earthquake's movement lock. A pulse rather than state: the tremor is a
+		// server-side schedule the client cannot derive, and the client is the only
+		// side that can actually stop the player -- see TremorLockPayload.
+		ClientPlayNetworking.registerGlobalReceiver(TremorLockPayload.TYPE, (payload, context) -> {
+			ClientRunState.beginTremorLock(payload.ticks());
+		});
+
+		// The run is over. Replaces whatever is on screen, which matters in exactly
+		// one case: a run can end while a pick is open (the dragon dies mid-choice),
+		// and ChoiceScreen has no escape. The server has already voided that pending
+		// pick in endRun, so replacing it strands nothing.
+		//
+		// Shown ONCE, on the transition. There is deliberately no client-tick guard
+		// re-opening it the way StartScreen has -- that guard makes a screen
+		// inescapable, and the recorded decision is that the world stays fully
+		// playable after a run ends.
+		ClientPlayNetworking.registerGlobalReceiver(RunEndPayload.TYPE, (payload, context) -> {
+			EntropyMod.LOGGER.info("Run ended: {} at entropy {}/{} -- {} pick(s), {} death(s).",
+					payload.outcome(), payload.entropy(), payload.entropyCap(),
+					payload.pickCount(), payload.deathCount());
+			context.client().setScreen(new EndScreen(payload));
+		});
+
+		// Run lifecycle. One payload drives three decisions -- see RunSyncPayload.
+		ClientPlayNetworking.registerGlobalReceiver(RunSyncPayload.TYPE, (payload, context) -> {
+			RunState state = payload.state();
+			ClientRunState.updateRun(state, payload.snapshot());
+			EntropyMod.LOGGER.info("Run sync: state={} keybinds={}",
+					state, payload.snapshot().isPresent() ? payload.snapshot().keys() : "(none held)");
+
+			Minecraft client = context.client();
+			if (state == RunState.NOT_STARTED) {
+				// Modal gate. Guarded so a re-sent payload cannot replace the screen
+				// out from under a player who has already clicked Start.
+				if (!(client.screen instanceof StartScreen)) {
+					client.setScreen(new StartScreen());
+				}
+				return;
+			}
+
+			// The run is live. This is what closes the start panel -- the screen
+			// never closes on its own click, so a refused start cannot leave the
+			// player outside the gate with no way to ask again.
+			if (client.screen instanceof StartScreen) {
+				client.setScreen(null);
+			}
+
+			// The server holds no snapshot for this player: either they were already
+			// online when someone else clicked Start, or they joined mid-run. Capture
+			// now. This is why there is no "send me your keybinds" request packet.
+			if (ClientRunState.needsKeybindCapture()
+					&& ClientPlayNetworking.canSend(KeybindSnapshotPayload.TYPE)) {
+				ClientPlayNetworking.send(new KeybindSnapshotPayload(KeybindCapture.capture(), false));
+			}
+		});
+
+		// Interim surface for the pick history, until a real screen exists.
+		//
+		// This used to log ONLY, which is why /entropyhistory looked broken in game:
+		// the round-trip was working perfectly and printing to logs/latest.log, where
+		// a player has no reason to look. Nothing was ever sent to chat. The history
+		// data, the SavedData persistence and the payload pair were all fine --
+		// see CLAUDE.md. Output now goes to chat; the log lines stay because they are
+		// what made that diagnosis possible in the first place.
+		ClientPlayNetworking.registerGlobalReceiver(HistoryResponsePayload.TYPE, (payload, context) -> {
+			if (payload.entries().isEmpty()) {
+				EntropyMod.LOGGER.info("Pick history: (empty -- no picks made yet this run)");
+				context.player().sendSystemMessage(Component.literal(
+						"[Entropy] No picks yet this run.").withStyle(ChatFormatting.GRAY));
+				return;
+			}
+			EntropyMod.LOGGER.info("Pick history -- {} entries:", payload.entries().size());
+			context.player().sendSystemMessage(Component.literal(
+					"[Entropy] Pick history -- " + payload.entries().size() + " pick(s):")
+					.withStyle(ChatFormatting.GOLD));
+			for (HistoryResponsePayload.Entry entry : payload.entries()) {
+				EntropyMod.LOGGER.info("  #{} [{}] entropy {} -> {} ({}) -- {}",
+						entry.pickNumber(), entry.phase(), entry.entropyAtPick(),
+						entry.effectName(), entry.effectId(), entry.effectDescription());
+
+				ChatFormatting phaseColor = entry.phase() == EffectPhase.GOOD
+						? ChatFormatting.GREEN
+						: ChatFormatting.RED;
+				context.player().sendSystemMessage(Component.literal(
+						"  #" + entry.pickNumber() + " ")
+						.withStyle(ChatFormatting.DARK_GRAY)
+						.append(Component.literal("[" + entry.phase() + "] ").withStyle(phaseColor))
+						.append(Component.literal(entry.effectName()).withStyle(ChatFormatting.WHITE))
+						.append(Component.literal(" -- " + entry.effectDescription()
+								+ " (entropy " + entry.entropyAtPick() + ")")
+								.withStyle(ChatFormatting.GRAY)));
+			}
+		});
+
+		// Keeps the start gate up. Two separate jobs, and the first is a real
+		// ordering hazard rather than defensiveness:
+		//
+		// 1. RunSyncPayload arrives during the join sequence, while the client may
+		//    still be on the level-loading screen -- and vanilla calls setScreen(null)
+		//    when that finishes, which would silently discard a start panel opened
+		//    from the network handler. The panel would simply never appear, on the
+		//    one path that matters most: a brand-new world.
+		// 2. It makes the gate genuinely un-escapable rather than merely un-closable,
+		//    since anything that does manage to clear the screen puts it straight back.
+		//
+		// Only acts when nothing else is on screen, so it cannot stomp another GUI.
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			if (client.level == null || client.player == null) {
+				return;
+			}
+			// Double Jump is ticked before the screen guard: it must keep running
+			// while a GUI is open, or opening the inventory mid-fall would strand
+			// the charge machine mid-state. It reads the jump key, which vanilla
+			// clears via KeyMapping.releaseAll when a screen opens, so a press
+			// cannot be registered through a GUI anyway.
+			ClientDoubleJump.tick(client.player);
+			OreSenseScan.tick(client.player);
+			// Also before the screen guard, and for a sharper reason than Double
+			// Jump's: this is a countdown the server started, so pausing it while a
+			// GUI is open would leave the player paralysed for however long they had
+			// the inventory up. A lock must expire on wall-clock ticks or not at all.
+			ClientRunState.tickTremorLock();
+			if (client.screen != null) {
+				return;
+			}
+			if (ClientRunState.runState() == RunState.NOT_STARTED) {
+				client.setScreen(new StartScreen());
+			}
 		});
 
 		// Persistent top-right entropy readout. addLast so it draws above the
@@ -49,21 +204,36 @@ public class EntropyModClient implements ClientModInitializer {
 
 		// Cached entropy is per-world; drop it on disconnect so the next world
 		// doesn't inherit the previous run's numbers.
-		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> EntropyHud.reset());
+		ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+			EntropyHud.reset();
+			// Same reason: a cached acquired set must not leak into the next world,
+			// or its client-side effects would still be scrambling a fresh run.
+			ClientRunState.reset();
+			// A banked air-jump charge must not survive into the next world either.
+			ClientDoubleJump.reset();
+			OreSenseScan.reset();
+		});
 
-		// Test-only command. Drives the same client-side state the real payload
-		// does, so the screen AND the HUD can be checked without the 3-min timer.
-		//   /entropytest
-		//   /entropytest <good|bad> <entropy>
-		//   /entropytest <good|bad> <entropy> <cap>
-		//   /entropytest <good|bad> <entropy> [cap] long
-		// Note this exercises the CLIENT rendering path only -- it does not
-		// prove the server serialises entropyCap. For that, see the codec
-		// round-trip check described in CLAUDE.md.
-		// Remove once the full loop is verified end-to-end.
+		// PREVIEW-ONLY command -- FAKE DATA, client-side, never touches the server.
+		//   /entropypreview
+		//   /entropypreview <good|bad> <entropy>
+		//   /entropypreview <good|bad> <entropy> <cap>
+		//   /entropypreview <good|bad> <entropy> [cap] long
+		//
+		// This opens ChoiceScreen with three hardcoded effect strings so colour,
+		// layout and description-wrapping can be checked instantly across the whole
+		// entropy range, without a server, a world state, or the 3-min timer. That
+		// is genuinely useful and is why it still exists.
+		//
+		// What it CANNOT do -- and this bit was previously easy to get wrong, since
+		// it was called /entropytest and looks identical on screen to a real pick:
+		// clicking a card here does NOT reach the server. No ChoiceMadePayload, no
+		// onChoiceMade, so no history entry, no ActiveEffect, no anti-stacking, no
+		// EffectBehavior. For any of that, use the server-side /entropyforcepick,
+		// which drives the real pipeline. See CLAUDE.md.
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
-			dispatcher.register(literal("entropytest")
-					.executes(ctx -> openTestScreen(ctx.getSource().getClient(),
+			dispatcher.register(literal("entropypreview")
+					.executes(ctx -> openPreviewScreen(ctx.getSource().getClient(),
 							EffectPhase.GOOD, 12, EntropyManager.DEFAULT_ENTROPY_CAP, false))
 					.then(argument("phase", StringArgumentType.word())
 							.then(argument("entropy", IntegerArgumentType.integer(0, 10000))
@@ -75,11 +245,29 @@ public class EntropyModClient implements ClientModInitializer {
 											.then(literal("long")
 													.executes(ctx -> run(ctx,
 															IntegerArgumentType.getInteger(ctx, "cap"), true)))))));
+
+			// TEMPORARY: asks the server for the pick history; the receiver above
+			// logs it. Unlike /entropypreview this DOES exercise the real server
+			// round-trip, so it proves the payload pair rather than only the client
+			// rendering path. Replace with a real history screen later.
+			dispatcher.register(literal("entropyhistory").executes(ctx -> {
+				if (!ClientPlayNetworking.canSend(HistoryRequestPayload.TYPE)) {
+					EntropyMod.LOGGER.warn("/entropyhistory -- server does not accept HistoryRequestPayload "
+							+ "(not an Entropy Mod server?)");
+					// This failure was also log-only, so a genuinely unsupported server
+					// looked identical to a working one that printed nothing.
+					ctx.getSource().sendError(Component.literal(
+							"This server does not support Entropy Mod's history request."));
+					return 0;
+				}
+				ClientPlayNetworking.send(HistoryRequestPayload.INSTANCE);
+				return 1;
+			}));
 		});
 	}
 
 	private static int run(CommandContext<FabricClientCommandSource> ctx, int cap, boolean longDescriptions) {
-		return openTestScreen(
+		return openPreviewScreen(
 				ctx.getSource().getClient(),
 				parsePhase(StringArgumentType.getString(ctx, "phase")),
 				IntegerArgumentType.getInteger(ctx, "entropy"),
@@ -94,9 +282,16 @@ public class EntropyModClient implements ClientModInitializer {
 		return good ? EffectPhase.GOOD : EffectPhase.BAD;
 	}
 
-	private static int openTestScreen(Minecraft client, EffectPhase phase, int entropy, int entropyCap,
-									   boolean longDescriptions) {
-		EntropyMod.LOGGER.info("/entropytest -- queueing ChoiceScreen phase={} entropy={}/{} long={}",
+	/**
+	 * Opens ChoiceScreen with fake, hardcoded choices. Preview only -- the ids
+	 * below are real registry ids so the screen looks right, but nothing is rolled
+	 * and clicking sends nothing anywhere.
+	 */
+	private static int openPreviewScreen(Minecraft client, EffectPhase phase, int entropy, int entropyCap,
+										  boolean longDescriptions) {
+		EntropyMod.LOGGER.info("/entropypreview -- FAKE DATA, client-only. Queueing ChoiceScreen "
+						+ "phase={} entropy={}/{} long={}. Clicking a card here does NOT reach the server; "
+						+ "use /entropyforcepick for the real pipeline.",
 				phase, entropy, entropyCap, longDescriptions);
 
 		// Feed the same cache the real payload does, so the HUD colour can be
@@ -115,7 +310,7 @@ public class EntropyModClient implements ClientModInitializer {
 		// just opened, in the same frame, with nothing logged anywhere. Using
 		// client.execute() runs this on the next tick, after chat has closed.
 		client.execute(() -> client.setScreen(new ChoiceScreen(
-				phase, entropy, entropyCap,
+				phase, entropy, entropyCap, RerollState.NOT_OWNED, 0,
 				"sure_footing", "Sure Footing", desc1,
 				"iron_stomach", "Iron Stomach", "Hunger drains 25% slower for 3 min",
 				"featherlight", "Featherlight", "No fall damage for 2 min"

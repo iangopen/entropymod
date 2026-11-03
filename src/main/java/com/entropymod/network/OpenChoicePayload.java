@@ -3,6 +3,7 @@ package com.entropymod.network;
 import com.entropymod.EntropyMod;
 import com.entropymod.entropy.EffectDefinition;
 import com.entropymod.entropy.EffectPhase;
+import com.entropymod.entropy.RerollState;
 import io.netty.buffer.ByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
@@ -24,6 +25,8 @@ public record OpenChoicePayload(
 		EffectPhase phase,
 		int entropy,
 		int entropyCap,
+		RerollState rerollState,
+		int rerollCharges,
 		Choice choice1,
 		Choice choice2,
 		Choice choice3
@@ -32,25 +35,33 @@ public record OpenChoicePayload(
 	public static final Identifier ID = EntropyMod.id("open_choice");
 	public static final CustomPacketPayload.Type<OpenChoicePayload> TYPE = new CustomPacketPayload.Type<>(ID);
 
-	// NOTE: .map() on a StreamCodec keeps the SAME buffer type (B) as the codec
-	// it's called on -- it doesn't widen it. ByteBufCodecs.STRING_UTF8 is
-	// StreamCodec<ByteBuf, String>, so mapping it stays StreamCodec<ByteBuf, ...>,
-	// not StreamCodec<RegistryFriendlyByteBuf, ...>. This is fine: composite()
-	// accepts component codecs of any buffer type that's a supertype of the
-	// composite's buffer type (ByteBuf is a supertype of RegistryFriendlyByteBuf),
-	// per Fabric/NeoForge docs: "Most methods... look for ? super B".
-	private static final StreamCodec<ByteBuf, EffectPhase> PHASE_CODEC =
-			ByteBufCodecs.STRING_UTF8.map(EffectPhase::valueOf, EffectPhase::name);
+	// The phase codec moved to EntropyCodecs once HistoryResponsePayload needed it
+	// too -- the wire format for EffectPhase is defined in exactly one place. The
+	// buffer-type note that used to live here is now in that class.
+	private static final StreamCodec<ByteBuf, EffectPhase> PHASE_CODEC = EntropyCodecs.PHASE;
 
 	// Every record component MUST have a matching line here -- composite drives
 	// encode and decode from the same list, so a field added to the record but
 	// not to this codec is silently dropped on the wire rather than failing to
 	// compile. entropyCap is what the client needs to colour its accent ramp;
 	// without it the client can only assume the default cap.
+	//
+	// rerollState was a boolean until the Second Guess button-state fix. A boolean
+	// could not distinguish "never had Second Guess" from "had it and spent it",
+	// which is exactly the difference between drawing no button and drawing a
+	// greyed one -- see RerollState.
+	//
+	// rerollCharges rides alongside it rather than being folded into the enum: the
+	// state answers "which button do I draw", the count answers "what does its
+	// label say". An enum cannot carry a number, and a button reading "Reroll"
+	// where the player has two banked is hiding the thing they most want to know.
+	// It is meaningful only for CHARGED and is 0 otherwise.
 	public static final StreamCodec<RegistryFriendlyByteBuf, OpenChoicePayload> CODEC = StreamCodec.composite(
 			PHASE_CODEC, OpenChoicePayload::phase,
 			ByteBufCodecs.VAR_INT, OpenChoicePayload::entropy,
 			ByteBufCodecs.VAR_INT, OpenChoicePayload::entropyCap,
+			EntropyCodecs.REROLL_STATE, OpenChoicePayload::rerollState,
+			ByteBufCodecs.VAR_INT, OpenChoicePayload::rerollCharges,
 			Choice.CODEC, OpenChoicePayload::choice1,
 			Choice.CODEC, OpenChoicePayload::choice2,
 			Choice.CODEC, OpenChoicePayload::choice3,
@@ -68,12 +79,13 @@ public record OpenChoicePayload(
 	}
 
 	public static OpenChoicePayload fromChoices(EffectPhase phase, int entropy, int entropyCap,
+												RerollState rerollState, int rerollCharges,
 												List<EffectDefinition> choices) {
 		EffectDefinition a = choices.get(0);
 		EffectDefinition b = choices.size() > 1 ? choices.get(1) : choices.get(0);
 		EffectDefinition c = choices.size() > 2 ? choices.get(2) : choices.get(0);
 		return new OpenChoicePayload(
-				phase, entropy, entropyCap,
+				phase, entropy, entropyCap, rerollState, rerollCharges,
 				new Choice(a.id(), a.displayName(), a.description()),
 				new Choice(b.id(), b.displayName(), b.description()),
 				new Choice(c.id(), c.displayName(), c.description())

@@ -3,8 +3,11 @@ package com.entropymod.client.gui;
 import com.entropymod.client.EntropyColors;
 import com.entropymod.client.EntropyHud;
 import com.entropymod.entropy.EffectPhase;
+import com.entropymod.entropy.RerollState;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.network.ChoiceMadePayload;
+import com.entropymod.network.RerollRequestPayload;
+import net.minecraft.client.gui.components.Button;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractWidget;
@@ -55,6 +58,12 @@ public class ChoiceScreen extends Screen {
 	// ---------------------------------------------------------------------
 
 	private static final int SCREEN_MARGIN = 12;
+
+	/** Reroll button geometry. Part of the centred layout block -- see init(). */
+	private static final int REROLL_BUTTON_HEIGHT = 20;
+	private static final int REROLL_BUTTON_MIN_WIDTH = 80;
+	private static final int REROLL_BUTTON_MAX_WIDTH = 220;
+	private static final int REROLL_GAP = 8;
 	private static final int PANEL_MAX_WIDTH = 160;
 	private static final int PANEL_MIN_WIDTH = 90;
 	private static final int PANEL_GAP = 20;
@@ -107,6 +116,25 @@ public class ChoiceScreen extends Screen {
 	private final int entropyCap;
 	private final List<Choice> choices;
 
+	/**
+	 * What the server says about rerolling for this pick. Authoritative -- the
+	 * client never infers it, because only the server holds the persisted
+	 * {@code rerollUsed} flag, the banked charge count and No Do-Overs' ban.
+	 */
+	private final RerollState rerollState;
+
+	/**
+	 * Banked charges, for the button's label. Meaningful only when
+	 * {@link #rerollState} is {@code CHARGED}; 0 otherwise.
+	 */
+	private final int rerollCharges;
+
+	/**
+	 * Non-null whenever {@link #rerollState} is not {@code NOT_OWNED}. Created
+	 * inactive for the two dead states, and deactivated on click for the live ones.
+	 */
+	private Button rerollButton;
+
 	/** Recomputed in init(); read by extractRenderState. */
 	private int accentColor = HEADER_COLOR;
 	private int headerTextY;
@@ -126,11 +154,12 @@ public class ChoiceScreen extends Screen {
 						 String id1, String name1, String desc1,
 						 String id2, String name2, String desc2,
 						 String id3, String name3, String desc3) {
-		this(phase, entropy, EntropyManager.DEFAULT_ENTROPY_CAP,
+		this(phase, entropy, EntropyManager.DEFAULT_ENTROPY_CAP, RerollState.NOT_OWNED, 0,
 				id1, name1, desc1, id2, name2, desc2, id3, name3, desc3);
 	}
 
-	public ChoiceScreen(EffectPhase phase, int entropy, int entropyCap,
+	public ChoiceScreen(EffectPhase phase, int entropy, int entropyCap, RerollState rerollState,
+						 int rerollCharges,
 						 String id1, String name1, String desc1,
 						 String id2, String name2, String desc2,
 						 String id3, String name3, String desc3) {
@@ -138,6 +167,8 @@ public class ChoiceScreen extends Screen {
 		this.phase = phase;
 		this.entropy = entropy;
 		this.entropyCap = entropyCap;
+		this.rerollState = rerollState;
+		this.rerollCharges = rerollCharges;
 		this.choices = List.of(
 				new Choice(id1, name1, desc1),
 				new Choice(id2, name2, desc2),
@@ -197,7 +228,16 @@ public class ChoiceScreen extends Screen {
 		// Vertically centre header + rule + panels as one block.
 		int headerBlock = this.font.lineHeight + 6 + ACCENT_RULE_HEIGHT;
 		int panelsBlock = columns ? panelHeight : panelHeight * 3 + ROW_GAP * 2;
-		int totalHeight = headerBlock + 14 + panelsBlock;
+		// The reroll button is part of the centred block, not an afterthought stuck
+		// underneath it -- otherwise it would push past the bottom edge at small GUI
+		// sizes, and this screen has no escape hatch (shouldCloseOnEsc is false).
+		// A spent reroll still reserves its space -- the button stays on screen,
+		// greyed, so the player can see the option existed and is gone rather than
+		// watching it silently vanish.
+		int rerollBlock = rerollState != RerollState.NOT_OWNED
+				? REROLL_GAP + REROLL_BUTTON_HEIGHT
+				: 0;
+		int totalHeight = headerBlock + 14 + panelsBlock + rerollBlock;
 
 		int top = Math.max(SCREEN_MARGIN, (this.height - totalHeight) / 2);
 		this.headerTextY = top;
@@ -220,6 +260,82 @@ public class ChoiceScreen extends Screen {
 					choices.get(i), wrapped.get(i),
 					layout.mode(), style, imageSize, scaledLineHeight));
 		}
+
+		if (rerollState != RerollState.NOT_OWNED) {
+			int buttonWidth = Math.min(REROLL_BUTTON_MAX_WIDTH,
+					Math.max(REROLL_BUTTON_MIN_WIDTH, this.width - 2 * SCREEN_MARGIN));
+			this.rerollButton = Button.builder(
+							Component.literal(rerollButtonLabel(rerollState, rerollCharges)),
+							button -> onReroll())
+					.bounds(this.width / 2 - buttonWidth / 2,
+							panelsTop + panelsBlock + REROLL_GAP,
+							buttonWidth, REROLL_BUTTON_HEIGHT)
+					.build();
+			// Vanilla's own disabled rendering: greyed border and greyed label, and
+			// clicks are dropped by Button itself rather than by onReroll. Both the
+			// wording and the colour change, so "gone" reads at a glance and also
+			// survives a colourblind player.
+			this.rerollButton.active = isRerollLive(rerollState);
+			this.addRenderableWidget(this.rerollButton);
+		}
+	}
+
+	/**
+	 * Whether the button can be clicked. {@code SPENT} and {@code FORBIDDEN} are
+	 * both dead but for different reasons, and both still <b>reserve their space</b>
+	 * and stay on screen greyed -- a player whose reroll silently vanished would
+	 * read it as the effect having stopped existing, which is the whole reason
+	 * {@link RerollState} is an enum rather than a boolean.
+	 */
+	private static boolean isRerollLive(RerollState state) {
+		return state == RerollState.AVAILABLE || state == RerollState.CHARGED;
+	}
+
+	/**
+	 * The label, which is the one place the player learns <em>which</em> resource a
+	 * click will spend.
+	 *
+	 * <p>{@code CHARGED} names the count because the server spends banked charges
+	 * before Second Guess -- so while any remain, a button saying "Second Guess"
+	 * would name one resource and consume another. Once they run out the same
+	 * button goes back to naming Second Guess, which is exactly when it starts
+	 * being true again.
+	 *
+	 * <p>Package-private and static so the harness can drive it; it is pure string
+	 * logic with no Minecraft types.
+	 */
+	static String rerollButtonLabel(RerollState state, int charges) {
+		return switch (state) {
+			case AVAILABLE -> "Second Guess — reroll these options";
+			case CHARGED -> charges == 1
+					? "Reroll these options (1 banked)"
+					: "Reroll these options (" + charges + " banked)";
+			case SPENT -> "Second Guess — already used";
+			case FORBIDDEN -> "No Do-Overs — rerolling is forbidden";
+			case NOT_OWNED -> "";
+		};
+	}
+
+	/**
+	 * Spends a reroll -- a banked charge if any remain, otherwise Second Guess.
+	 * <b>Which one is the server's decision</b>, not this screen's; the payload
+	 * carries no resource and the button's label is the only thing that differs.
+	 *
+	 * <p>The screen deliberately stays open: the server answers
+	 * with a fresh {@code OpenChoicePayload} which replaces it, and if the reroll is
+	 * refused for any reason the player keeps the pick they already had rather than
+	 * being stranded with no screen and a pending choice.
+	 *
+	 * <p>The button is disabled immediately so a double-click cannot send two
+	 * requests. The server would reject the second anyway -- {@code requestReroll}
+	 * re-checks everything -- but there is no reason to make it arbitrate a race
+	 * this side can simply not start.
+	 */
+	private void onReroll() {
+		if (this.rerollButton != null) {
+			this.rerollButton.active = false;
+		}
+		ClientPlayNetworking.send(RerollRequestPayload.INSTANCE);
 	}
 
 	record DescriptionStyle(float scale, int maxLines) {

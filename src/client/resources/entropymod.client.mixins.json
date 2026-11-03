@@ -3,7 +3,15 @@
 	"package": "com.entropymod.client.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"client": [
-		"EntropyModClientMixin"
+		"EntropyModClientMixin",
+		"CameraMixin",
+		"ClientEdgeSafetyMixin",
+		"ClientFlyingSpeedMixin",
+		"ClientFrictionMixin",
+		"ClientImmobileMixin",
+		"ClientSprintJumpMixin",
+		"ClientSprintMixin",
+		"KeyboardInputMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

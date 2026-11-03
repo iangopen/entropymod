@@ -44,304 +44,746 @@ puts GitHub back to its pre-rewrite state is in `C:\devwork\portfolio-audit\ENTR
 
 ---
 
-## Part 0: Mapping migration note (read this first if anything won't compile)
+## Part 1: Core architecture — the rules that hold everywhere
 
-This project's Loom setup uses **Mojang's official mappings**, not Yarn.
-This matters because almost every Minecraft-tutorial or Stack Overflow
-snippet you'll find online is written in Yarn names. As of Minecraft
-1.21.11, Yarn mappings stopped being published entirely -- this project
-targets 26.1.2, which is newer, so Yarn names don't even exist for it.
+*(Per-component status and known gaps moved to the `entropy-design` skill.
+Per-effect implementation findings moved to the `entropy-effects` skill.)*
 
-Confirmed correct names (verified against docs.fabricmc.net for MC 26.1.2,
-not guessed) vs. the Yarn names you'll see in older guides:
+### Effect execution — BUILT, and now with real content
+Picking an effect routes through a per-effect class in
+`com.entropymod.entropy.behavior`. **As of the permanent-effects session these
+are no longer stubs** — all 20 Tier 1 effects change real game state.
 
-| Yarn (don't use)      | Mojang (use this)              |
-|------------------------|--------------------------------|
-| `CustomPayload`        | `CustomPacketPayload`          |
-| `CustomPayload.Id<T>`  | `CustomPacketPayload.Type<T>`  |
-| `getId()` override     | `type()` override              |
-| `PacketCodec`          | `StreamCodec`                  |
-| `RegistryByteBuf`      | `RegistryFriendlyByteBuf`      |
-| `PacketCodec.tuple`    | `StreamCodec.composite`        |
-| `PayloadTypeRegistry.playS2C()` | `PayloadTypeRegistry.clientboundPlay()` |
-| `PayloadTypeRegistry.playC2S()` | `PayloadTypeRegistry.serverboundPlay()` |
-| `Text` / `Text.literal`| `Component` / `Component.literal` |
-| `PlayerManager`        | `PlayerList`                   |
-| `getPlayerManager()`   | `getPlayerList()`              |
-| `World`                | `Level`                        |
-| `PlayerEntity`         | `Player`                       |
-| `ServerPlayerEntity`   | `ServerPlayer`                 |
-| `ActionResult`         | `InteractionResult`            |
-| `StatusEffectInstance` | `MobEffectInstance`            |
-| `ButtonWidget`         | `Button`                       |
-| `.dimensions(x,y,w,h)` (button) | `.bounds(x,y,w,h)`     |
-| `addDrawableChild`     | `addRenderableWidget`          |
-| `DrawContext`          | *(see render pipeline note below)* |
-| `TextRenderer` / `this.textRenderer` | `this.font`      |
-| `ClientCommandManager` (client cmds) | `ClientCommands`         |
-| `CommandManager` (server cmds)       | `Commands`               |
+**Adding a new effect is exactly three things, and nothing else:**
 
-**One correction to the Fabric docs' own wording:** the networking doc page
-says the server is accessible "via `ServerPlayerEntity.server`" as if it's a
-public field. In this version's mappings it's **private**. The verified
-working accessor (confirmed against two separate examples in the same docs
-page) is: `((ServerLevel) player.level()).getServer()` -- `player.level()`
-appears directly in the docs' server-receiver example, and the
-`(ServerLevel)` cast appears in the docs' Lightning Tater example; combining
-them is what actually compiles. A `serverLevel()` method (guessed before
-this) does not exist on `ServerPlayer` in this mapping -- don't reuse that.
+1. one `register(...)` line in `EffectRegistry`
+2. one new class in `com.entropymod.entropy.behavior`
+3. one `register(...)` line in `EffectBehaviors`
+
+Most new effects should extend `AttributeEffectBehavior` and be ~10 lines. If a
+new effect makes you edit a fourth file, that's a signal the abstraction is
+missing something; fix the abstraction rather than the caller.
+
+**Two optional hooks on `EffectBehavior` exist for effects whose content is a
+change to the PICK LOOP rather than to the player.** Both default to doing
+nothing, so every effect written before them is unaffected and the three-things
+rule still holds:
+
+- `expandGrant(offeredIds, chosenId)` — "one card was clicked; which effects does
+  this pick grant?" Called before anything is acquired, so no-repeat,
+  anti-stacking, history and `apply` all then run uniformly over a list. Twin
+  Fate is the only user. **The pick still costs exactly 1 entropy and 1 pick.**
+- `onAcquired(EntropyManager)` — "this effect just joined the run; arm whatever it
+  arms." **Not `apply`**, and the distinction is load-bearing: `apply` runs again
+  on every respawn, and "bank two reroll charges" is not idempotent. This runs
+  exactly once per effect per run, from `onChoiceMade` **and** `/entropygrant`.
+
+They are deliberately not a central switch on effect id in `EntropyManager` —
+that would be the fourth-file edit this section warns about. See the
+`entropy-effects` skill, "The Tier 2 META batch", for the full architecture,
+including why `EffectRegistry.SCALABLE_SEVERITY_IDS` is only eight effects and
+why a design built on "pick it again" cannot work under no-repeat.
+
+- `EffectBehavior` — `apply(EffectContext)` / `remove(EffectContext)`. Per
+  Open Question 9 this is option (b), one class per effect, not a big switch.
+- `EffectContext` — wraps the server, the `EffectDefinition`, **a specific
+  target `ServerPlayer`**, and a `Reason` (`PICKED` vs `REAPPLIED`). The target
+  is not optional: re-application happens one player at a time, and the old
+  "first player in the list" shortcut would have buffed the wrong player the
+  moment a second one existed.
+- `EffectBehaviors` — id → behavior map. Ids are matched to `EffectRegistry` by
+  **string**, which the compiler cannot check, so each behavior exposes an `ID`
+  constant that both files use, and `validate()` reports both directions of
+  mismatch at init.
+
+**`apply` MUST be idempotent.** This is the most important rule in the codebase
+now and the easiest to break. `apply` runs once on the pick and then *again on
+every respawn, rejoin and dimension change* — an unbounded number of times.
+`AttributeEffectBehavior` gets this right via `addOrUpdateTransientModifier`;
+see the `entropy-mappings` skill for why `addTransientModifier` is the trap.
+
+### Permanent effects — the architecture shift, and why
+**Every effect is permanent. `EffectDefinition` has no duration field at all.**
+
+It used to have `durationTicks`, an int whose value encoded three different
+lifetimes: `0` = fire once and never track, `-1` = until the next interval,
+`>0` = a tick countdown. That was replaced rather than extended, because an
+overloaded magic number cannot tell you which of its meanings is in play at the
+point you read it, and every consumer had to branch on all three.
+
+**If temporary effects ever return, they must not return as an int.** Add a
+`sealed interface EffectDuration` with `Permanent` and `Ticks(int)` cases so the
+compiler forces every call site to handle both. This is written into
+`EffectDefinition`'s javadoc as well.
+
+What this deleted, rather than left unreachable:
+- `ActiveEffect` — the entire class. Its only job was holding `remainingTicks`
+  and the interval-scoped flag.
+- `ActiveEffectTracker.tickAndCollectExpired()` and `expireIntervalScoped()`.
+- The expiry pass in `EntropyManager.tick()`, which is back to just counting.
+- `EffectContext.announceApply()/announceRemove()` — the stub-era scaffolding.
+  The pick announcement moved to `EntropyManager`, because it is a statement
+  about the *run* ("you chose this"), and behaviors now also run on every
+  respawn where announcing would be pure spam.
+
+`ActiveEffectTracker` became **`AcquiredEffects`** — renamed because "tracker"
+described countdown machinery that no longer exists. It is an insertion-ordered
+`LinkedHashSet<String>` of effect ids and nothing more.
+
+**The important consequence: three concerns collapsed into one set.** With
+permanence, "currently active", "already picked", and "which categories are
+occupied" are the same fact. They were three separate things under the old
+model and are now one, which means they cannot drift apart. Do not reintroduce a
+second set for any of them.
+
+### Persistence — BUILT (was: "not built")
+`EntropyManager` **is** a `SavedData`, stored on the overworld's
+`SavedDataStorage`. This replaced the in-memory
+`WeakHashMap<MinecraftServer, EntropyManager>`.
+
+This became mandatory, not nice-to-have, the moment effects became permanent: in
+singleplayer, quitting to the title screen stops the integrated server, so
+without it every acquired effect and the entire run vanished on a trip through
+the main menu. "Effects survive logout/login" cannot be delivered by
+re-application alone if the list of what to re-apply is gone.
+
+- Persisted: entropy, pick count, game-over, cap, interval, the acquired-effect
+  ids, and the full pick history.
+- **Not** persisted, deliberately: `tickCounter` (a saved partial countdown
+  would let a player reload repeatedly to sit just below the threshold forever;
+  losing at most one interval on load is the better failure) and
+  `waitingOnChoice` (a pending choice cannot outlive the client answering it).
+- **Every mutation must call `setDirty()`** or it is not written. That is the
+  one easy-to-miss rule in the file.
+- **Every codec field is `optionalFieldOf` with a default.** That is what lets a
+  save from an older build load in a newer one. Adding a *required* field would
+  make every existing save unloadable — don't.
+- An effect id in a save that this build no longer defines is skipped with a
+  warning, not a load failure.
+
+### Re-application across death, relog and dimensions — BUILT
+**Verified, not assumed:** vanilla's `ServerPlayer.restoreFrom` calls
+`AttributeMap.assignPermanentModifiers` only inside an `ifeq` on its boolean
+parameter, and `PlayerList.respawn` passes that parameter straight through —
+`false` for a death. A death respawn also constructs a brand-new `ServerPlayer`.
+So **attribute modifiers are dropped on death respawn.**
+
+The fix is three hooks in `EntropyMod`, all calling `reapplyAll`:
+`ServerPlayerEvents.JOIN`, `ServerPlayerEvents.AFTER_RESPAWN`, and
+`ServerEntityLevelChangeEvents.AFTER_PLAYER_CHANGE_LEVEL` (an ordinary portal
+moves the same entity and does *not* go through respawn, so without the third
+hook a trip to the Nether would quietly drop everything).
+
+**These hooks are not a safety net — they are the only thing that puts effects
+back.** Modifiers are applied *transiently*, deliberately:
+`addOrReplacePermanentModifier` would write them into the player's own NBT,
+making the save file a second source of truth that could disagree with
+`AcquiredEffects` — including leaving orphaned buffs behind if the mod were
+removed. Transient means the acquired set is the **only** truth and attributes
+are derived state, rebuilt from it every time. The cost is that re-application
+is mandatory; that is a good trade for an invariant that cannot drift.
+
+### No-repeat — BUILT, and distinct from anti-stacking
+These are two different rules and are easy to confuse. They are applied in
+priority order in `EffectRegistry.roll`:
+
+| | No-repeat | Anti-stacking |
+|---|---|---|
+| Keyed on | effect **id** | effect **category** |
+| Scope | the whole run, permanently | while a category is occupied |
+| Status | **hard rule**, applied first | **soft rule**, dropped first |
+
+**No-repeat:** once an effect is picked it never appears again for the rest of
+the run. Under permanence, being re-offered something you already have is
+meaningless — there is nothing to refresh.
+
+**Priority matters and is deliberate.** If both filters together empty the pool,
+anti-stacking is abandoned *first* and no-repeat is kept: a second MOVEMENT
+effect is a real playable outcome, a duplicate of an effect you already own is
+not. Only if no-repeat *alone* empties the pool is it dropped, flagged via
+`RollResult.repeatFallback()`.
+
+**The repeat fallback is genuinely reachable today**, not theoretical: with 17
+GOOD and 17 BAD effects it fires on the 18th pick of either phase — asserted
+exactly, at that pick number, by the headless harness. It is a
+tested path, and it is still PLACEHOLDER policy — Open Question 6 remains open,
+and more content is the real fix.
+
+A partial result (1 or 2 cards) is not a fallback and is not flagged. It is the
+honest answer when the pool is that small, and it is the normal experience for
+the last two picks of a phase.
 
 
-`Identifier` is correct as-is in both -- Mojang appears to have renamed
-their own `ResourceLocation` to `Identifier` at some point, so this one
-name is shared between old-Yarn-style code and current Mojang mappings.
+### When a mixin applies cleanly and STILL changes nothing — read this first
+The mixin cluster shipped with javap-verified targets and 116 green headless
+checks, and two of its five effects did not work in game. Neither was a broken
+injection. **"The mixin applied" and "the behaviour changed" are separate
+claims, and the project has now been burned by the gap between them.** Three
+distinct failure modes, all real, none visible to the build:
 
-**Bigger change: the screen render pipeline itself is different in this MC
-version**, not just renamed. Screens no longer override
-`render(DrawContext, mouseX, mouseY, delta)`. Instead they override
-`extractRenderState(GuiGraphicsExtractor graphics, mouseX, mouseY, delta)`
-(must call `super.extractRenderState(...)` first).
+1. **A subclass overrides the method you targeted.** Targeting
+   `LivingEntity.foo` does nothing for players if `Player` overrides `foo` and
+   never calls `super`. Both of these exist here and were missed on the first
+   pass: **`Player` overrides `playStepSound`** and **`ServerPlayer` overrides
+   `onChangedBlock`**. Both happen to call `super` on the common path, so those
+   two mixins survived — that was luck, not design. Before targeting anything on
+   `Entity`/`LivingEntity`, check the whole chain and whether the override
+   delegates:
 
-**This is now VERIFIED, not guessed** (commit `422687d`). Every GUI symbol
-was checked with `javap` against the deobfuscated jar rather than inferred
-from docs. If you need to check something else, this is the command:
+   ```bash
+   for c in ...player.Player ...entity.Avatar ...level.ServerPlayer; do
+     javap -p -cp <jar> $c | grep -i '<methodName>'; done
+   ```
+
+2. **Something downstream re-clamps the value you changed.** The Heavy Footsteps
+   case above: `getVisibilityPercent` is genuinely multiplied, and the result is
+   genuinely thrown away by a second distance check that does not consult it.
+   Modifying a value is not the same as changing the outcome — **trace every
+   consumer of the value, not just the one you found.**
+
+3. **The change is real but below the perceptual threshold.** Magnetic Boots at
+   1.5x moved pickup reach from 1.3 to 1.8 blocks and read as "may work". Not a
+   bug; the wrong magnitude, and indistinguishable from a bug from the player's
+   seat.
+
+**The diagnostic that actually resolved all of this was `run/logs/latest.log`,
+which is in the repo.** It is the single highest-value evidence source in the
+project and it beats reasoning from the source every time — it proved the
+attribute registered, the effects applied with no error, all 28 behaviors wired,
+and the entire history round-trip working. **Read it before forming a
+hypothesis.** Useful greps:
 
 ```bash
-javap -p -cp ~/.gradle/caches/fabric-loom/minecraftMaven/net/minecraft/\
-minecraft-clientonly-deobf/26.1.2/minecraft-clientonly-deobf-26.1.2.jar \
-  net.minecraft.client.gui.GuiGraphicsExtractor
+grep -iE "entropymod|Entropy" run/logs/latest.log | tail -60
+grep -iE "mixin|inject|redirect|does not have|Registered custom attribute" run/logs/latest.log
 ```
 
-Use `javap -p -c` for bytecode when argument *order* is what's in doubt.
-Prefer this over the docs site -- it is the actual shipped API.
+Corollary for future effects: **an effect is not done when the mixin applies.**
+It is done when a value has been observed to change in game. Prefer effects whose
+result is directly measurable, and when a magnitude is chosen, sanity-check what
+it means in blocks/hearts/seconds before shipping it.
 
-Facts that checking produced, three of which contradicted reasonable guesses:
+### Two findings from the survival-batch revision that generalise
+*(Derivations, tables and javap evidence are in the `entropy-effects` skill, under
+Slippery Grip and Phoenix Chambered Heart. These are here because they are not
+really about those effects.)*
 
-- `GuiGraphicsExtractor` **is** in `net.minecraft.client.gui`. The old note
-  called this the least-verified import in the project; it was right.
-- **`mouseClicked` changed signature**: it is now
-  `mouseClicked(MouseButtonEvent, boolean)`, *not*
-  `(double mouseX, double mouseY, int button)`. Get coordinates from
-  `event.x()` / `event.y()`. Any tutorial older than this version is wrong
-  here, and the mismatch fails as "method does not override" rather than
-  anything that points at the real cause.
-- **`fill(x1, y1, x2, y2, argb)` is corner-to-corner, not `(x, y, w, h)`.**
-  Its bytecode swaps each pair when out of order, so either winding works,
-  but passing a width where a right edge belongs silently draws garbage.
-- **`fill` colours need an explicit alpha byte.** `0x707070` has alpha 0 and
-  draws *nothing*. Use `0xFF707070`. Note this differs from text colours,
-  which `Font` promotes to opaque when the alpha bits are empty -- so
-  `0xFFFFFF` works for text but is invisible as a fill. This asymmetry is a
-  very easy way to lose an hour.
-- Useful `GuiGraphicsExtractor` methods beyond `text`: `fill`, `fillGradient`,
-  `outline`, `centeredText`, `textWithWordWrap`, `enableScissor` /
-  `disableScissor`, `pose()` (a JOML `Matrix3x2fStack` with
-  `pushMatrix`/`popMatrix`/`scale`/`translate` -- this is how you get
-  smaller text, since Minecraft has exactly one font size).
-- Custom widgets extend `AbstractWidget(x, y, w, h, Component)` and implement
-  `extractWidgetRenderState(...)` + `updateWidgetNarration(...)`.
-  `AbstractWidget.mouseClicked` hit-tests the full widget rect, plays the
-  click sound, then calls `onClick` -- so a panel-sized widget gets
-  whole-panel clicking for free. Prefer this over `Button` when the visual
-  is custom, and over manual hit-testing in `Screen`.
-- **`HudRenderCallback` does not exist in this Fabric API version.** Nearly
-  every HUD tutorial online uses it. The current API is
-  `HudElementRegistry.addLast(Identifier, HudElement)` (also `addFirst` /
-  `attachElementBefore` / `attachElementAfter`, anchored on the ids in
-  `VanillaHudElements`), and `HudElement` is a single method:
-  `extractRenderState(GuiGraphicsExtractor, DeltaTracker)` -- the same
-  graphics type the screen pipeline uses.
-- **The HUD keeps rendering while a `Screen` is open.** Confirmed in
-  `GameRenderer`'s bytecode: the `Gui.extractRenderState` call is gated only
-  on a boolean parameter, while the `Screen` call is separately gated on
-  `minecraft.screen != null`. Any HUD element that shouldn't show behind an
-  open GUI must check `Minecraft.getInstance().screen == null` itself.
-- `StreamCodec.composite` supports up to 12 component pairs here, so the
-  old "arity limit" worry in the networking notes no longer applies.
+**1. Grant real vanilla `MobEffectInstance`s rather than imitating them.** Phoenix
+Chambered Heart's death save grants Regeneration/Health Boost/Absorption X instead
+of setting a health number: **+40.0 max health, 40.0 absorption granted filled,
+1.0 HP healed every tick**. The part that generalises is **expiry** —
+`LivingEntity.refreshDirtyAttributes()` → `onAttributeUpdated` clamps health and
+absorption down when their maxima fall, so **there is no mod-side timer and
+nothing to clean up**, and the grants compose with the permanent `MAX_HEALTH`
+effects because each modifier carries its own `Identifier`. A hand-rolled version
+would have had to get all of that right by hand.
 
-If you hit a "cannot find symbol" error not covered by this table: check
-`docs.fabricmc.net/develop/...` for the specific system (networking, GUI,
-text, etc.) -- the docs site versions itself per MC release and the current
-page reflects 26.1.2 specifically, which is what this project needs.
+**1b. Changing an attribute is not the same as changing a mechanic — sweep for
+every branch that grants the same thing.** Slippery Grip halved sprint speed
+through `MOVEMENT_SPEED` and shipped; sprint-jumping ignored it almost entirely.
+No injection was broken. Vanilla rewards sprinting in **three** independent
+places, and the attribute is only one: `jumpFromGround` adds a **flat 0.2
+blocks/tick** forward impulse that reads no attribute, and
+`Player.getFlyingSpeed` returns `0.02 -> 0.025999999`. The second is the one that
+matters most, because `getFrictionInfluencedSpeed` is
+`onGround() ? getSpeed() * ... : getFlyingSpeed()` — **while airborne
+`MOVEMENT_SPEED` is not consulted at all**, so for the whole of every jump the
+compensator was inert rather than merely outvoted. Measured, the curse's sprint
+was 2.16 b/s on the ground and **6.33 b/s while jumping — faster than walking**,
+i.e. inverted into a reason to sprint.
 
----
+This is a **fourth** failure mode alongside the three above, and the diagnostic
+that finds it is not a log: it is `javap | grep isSprinting` (or whatever the
+condition is) across the *whole* movement path, before writing anything. The fix
+generalises too — scale **every** branch by one shared factor read from the live
+value, never a second constant. Vanilla's horizontal movement is linear and
+homogeneous in (ground accel, air accel, impulse), so one factor scales every
+sprinting motion by exactly that factor and preserves vanilla's own internal
+ratios (sprint-jumping stays worth the same 27% over flat sprinting).
 
-## Part 1: Evaluation of what's built so far
+**1c. An entity query is O(entities); a block sweep is O(volume).** Danger Sense's
+32-block radius is a 274,625-position box — 56x Green Thumb's — and is nearly free,
+because `getEntitiesOfClass` is served by entity section storage. Never reason
+about a proximity effect's cost from its radius without first asking which of the
+two it is. Corollary: the query is a *box* and effects are *spheres*, so a missing
+`distanceToSqr` filter silently leaks the range by 73% (`r × √3`).
 
-### `EntropyManager` (the timer/loop) — solid core, missing win-detection
-**What it does well:** clean separation of tick-counting from pick-triggering,
-phase alternation via `pickCount % 2` is simple and correct, entropy-cap check
-is in the right place (start of `triggerPick`, before rolling).
+**1d. A tick-driven effect must model its SAMPLING POINT, not the idealised event
+order.** Double Jump shipped with a green harness that fed a state
+`END_CLIENT_TICK` can never observe: `aiStep` calls `jumpFromGround` at offset 460
+but `travel`/`move` — which writes `onGround` — at 615, so on the jump tick
+`onGround()` already reads false. The logic was right and wrong in place. Establish
+what your hook observes relative to the vanilla code you care about **by offset**,
+then test that order. (Fifth failure mode; unlike the others it is not about mixins.)
 
-**Weaknesses / gaps:**
-- No detection of the actual *win condition*. Right now the only end state
-  the code knows about is "entropy hit the cap" (loss). There's no listener
-  for the Ender Dragon dying, so the mod currently can't tell a win from a
-  loss, or stop the loop early on a win. This is arguably the single most
-  important missing piece — see Open Question 1.
-- `waitingOnChoice` is a single global flag. In multiplayer, one player
-  sitting on an open GUI blocks the entire server's timer for everyone.
-  Might be fine for solo play (which this was originally framed around) but
-  worth confirming — see Open Question 2.
-- In-memory only, `WeakHashMap<MinecraftServer, EntropyManager>`. Entropy and
-  pick count reset to 0 on every server restart. Needs a real
-  `PersistentState` (or equivalent) to survive a save/reload.
-- No countdown warning before a pick forces open — it just happens. Might be
-  jarring; might be exactly the point (see Open Question 8).
+**1e. A mob's ground acceleration is its `MOVEMENT_SPEED` SQUARED, and its real
+`FOLLOW_RANGE` is not the attribute's default.** `Mob.setSpeed(f)` also calls
+`setZza(f)`, so a mob's forward input is its speed rather than a player's
+normalised 1.0 — read a creeper's 0.25 the player way and you overstate it 4x.
+Separately, `Attributes.FOLLOW_RANGE` defaults to 32.0 but
+`Mob.createMobAttributes()` overrides it to 16.0. **Always read a mob's attributes
+from `DefaultAttributes.getSupplier(EntityType.X)`, never from the attribute.**
+Spawning anything also means reusing `SafeSpawn` — see `entropy-effects`.
 
-### `EffectRegistry` / `EffectDefinition` (data model) — good bones, one real design gap
-**What it does well:** effect-as-data instead of effect-as-code matches your
-usual engine/UI-separation discipline (same pattern as Puzzikub's archetype
-system, MelodyBrain's layered build). Adding effect #47 later is just a new
-`register(...)` call, no core-loop changes needed.
+**1f. The component you can test is not the component that breaks.** Unstable and
+Creeper Magnet shipped with the cadence asserted over 200 consecutive cycles and
+failed in play as "fired once, then silence" — the schedules were perfect and
+`SafeSpawn` was returning null on three triggers in four, because every line of it
+needed a `ServerLevel` and none of it was harness-reachable. **Split a scheduled
+effect's pure decisions out as Minecraft-free statics so they can be driven, and
+make every failure path name its own cause in the log** — the diagnosis here
+needed the world save's heightmap only because the log said *that* it failed and
+not *why*. See `entropy-effects`.
 
-**Weaknesses / gaps:**
-- `minEntropy`/`maxEntropy` are hard cutoffs. Once entropy passes an effect's
-  `maxEntropy`, it can never appear again. Earlier in this chat we talked
-  about wanting higher entropy to still occasionally blend in lower-tier
-  effects rather than being *purely* extreme — the current model can't do
-  that; it needs either overlapping/open-ended ranges or a weighting system.
-  See Open Question 3.
-- No weighting at all within a tier — `rollThree` treats every eligible
-  effect as equally likely. Fine for now with only 11 effects, but once
-  Tier 2-4 + odd effects are all in the same pool, some effects (e.g. a
-  "harmless funny" one vs. a "genuinely brutal" one) probably shouldn't have
-  equal odds. Not urgent, flagging for later.
-- Only Tier 1 (11 effects) is actually in the registry. Tiers 2-4 and all the
-  odd/signature effects exist only in the design doc, not in code.
-- `counterplay` flag exists on the data model but nothing reads/enforces it
-  yet (e.g. "never roll 3 counterplay:false effects at once below entropy 40"
-  isn't checked anywhere).
+**1g. Model a mechanic in the quantity the GAME uses, and log what shipped.**
+Unstable's spawn band was measured horizontally while vanilla's explosion damage
+reads the 3D distance and discards anything past `2 * radius` — so a "5-7 block"
+TNT could sit 10.63 blocks away, and 27.6% of spawns did literally nothing. Its
+damage table also assumed full exposure, when `ServerExplosion.getSeenPercent`
+multiplies `impact` by an occlusion fraction that reaches 0 in ordinary terrain.
+**Both drive `impact` to 0, and the formula's trailing `+1` then IS the result —
+1.0 damage, which is exactly what got reported.** Only failures were logged, so
+there was no record of the distance actually achieved; a tuned number never
+compared against what shipped is a number nobody is checking. See
+`entropy-effects`.
 
-### Networking (`OpenChoicePayload`, `ChoiceMadePayload`) — functionally complete, unverified
-**What it does well:** clean split of S2C (here are your choices) vs C2S
-(here's my pick), manual codec avoids the `PacketCodec.tuple` arity limit.
+**1h. Idempotency for an ENTITY-SPAWNING effect is a different property.** Every
+effect before the companion cluster rebuilt *derived* state, so "apply ten times,
+assert the value didn't move" was the test. Companions are *world state that
+already exists*: re-running `apply` is fifteen more wolves. The careful-looking fix
+— record UUIDs, resolve them, top up the shortfall — is a bug, because
+`ServerLevel.getEntity(UUID)` only finds **loaded** entities, so a player logging in
+far from their pack gets a fresh set every relog. **Spawn only on
+`EffectContext.isFreshPick()`**, which makes "no duplicates" structural rather than
+dependent on a lookup succeeding. See `entropy-effects`.
 
-**Weaknesses / gaps:**
-- First version used Yarn-mapped class names (`RegistryByteBuf`,
-  `PacketCodec`, `CustomPayload`) against a Mojang-mapped project, which
-  doesn't compile — see "Part 0: Mapping migration note" above. Rewritten
-  and verified against current Fabric docs; still genuinely uncompiled by
-  an actual `javac` run, so treat as "should be right" rather than "proven
-  right" until the first real `./gradlew build` succeeds.
-- No handling for a player joining mid-pick (i.e., a pick is open, a new
-  player joins — do they get the pending payload resent, or do they just
-  miss this round entirely and see the world "paused" with no explanation)?
-  See Open Question 4.
-- No timeout/fallback if a client never responds (disconnect mid-pick,
-  crash, etc.) — `waitingOnChoice` would stay `true` forever, freezing the
-  loop. Needs at minimum a server-side timeout that auto-picks or skips.
+**1t-1y. Three findings from the Tier 2 combat batch, all in `entropy-effects`.** The
+damage-DEALT hook is not the damage-taken hook reversed — only
+`CombatTracker.recordDamage`'s argument, inside `actuallyHurt`, is the post-mitigation
+number. Vanilla's only true-damage precedent is **sonic boom, not the void**:
+`#bypasses_enchantments` has exactly one entry, so void damage is still reduced by
+Protection. And `LivingEntity.INVULNERABLE_DURATION` puts a **10-tick floor** under any
+effect that promises two hits — closer than that and the second is discarded silently.
 
-### GUI (`ChoiceScreen`) — visual overhaul done, verified
-**Read `ChoiceScreen.java`'s class javadoc before editing it** — it records
-the verified-by-javap API facts that the file depends on.
+**1af/1ag. NO attribute value can immobilise a player, and the lock belongs on the
+CLIENT.** `MOVEMENT_SPEED`'s floor really is 0.0 and Slowness 6 reaches it — that is not
+the obstacle. A player at zero still jumps and bunny-hops, because `getFlyingSpeed`
+(hardcoded `0.02`/`0.026`), `jumpFromGround`'s flat `+0.2` sprint impulse and
+`JUMP_STRENGTH` read no `MOVEMENT_SPEED` at all. Use **`Player.isImmobile()`**, vanilla's
+own lock: it zeroes `jumping`/`xxa`/`zza` in `aiStep` between `applyInput` (218) and both
+consumers (460, 516), which is a **movement-only** lock — attack/mine/interact run off a
+different path entirely. It must be **client-side**: `ServerPlayer` never writes those
+fields, and vanilla's own `handleMovePlayer` sleeping branch is only a generous
+snap-back backstop behind the client lock. See `entropy-effects` 1af-1ah, including why
+"blind for the whole 80-tick window" has to be granted as **101**.
 
-**Resolved in commit `422687d`** (was: "no color theming", "buttons go
-off-screen at higher GUI scale"):
+**1ac/1ad. TWO ways to ship a cue the TARGETED player never sees, with a green build.**
+Both were hit on Earthquake's particles; both are in `entropy-effects`, flagged. **A
+`levelEvent` `data` int is an untyped per-event encoding** — for `PARTICLES_SMASH_ATTACK`
+it is very nearly a literal particle count, and shipping `2` where vanilla's own caller
+passes **750** rendered three particles, two of them 3.5 blocks away. Read the client's
+`switch` case for the units *and* vanilla's caller for the scale; the second is the one
+that catches it. Separately, **`levelEvent` and `playSound` both take a player to
+EXCLUDE** as their first argument (`PlayerList.broadcast`: `if (player == except)
+continue`), because vanilla's usual caller is a client-predicted action. Nothing a mod
+schedules server-side is predicted, so **it must be `null`** — passing the affected
+player delivers the cue to every bystander and never to them. `levelEvent`'s 3-arg
+overload is safe by construction; **`playSound` has no safe overload.** Regression-tested
+by `Checks.methodPushesExplicitNull`, which decodes bytecode rather than scanning it.
 
-- **GUI-scale responsiveness — RESOLVED.** Panel width is computed from
-  `this.width`, not a fixed constant: three columns while each panel can hold
-  `PANEL_MIN_WIDTH` (90), otherwise a vertical stack of three rows. Verified
-  non-clipping from 2560px logical width down to 80px. Minecraft's own floor
-  is 320x240 logical, which lands in the row-stack branch. This is a *hard*
-  requirement, not cosmetic: `shouldCloseOnEsc()` is `false`, so anything
-  that renders unusably traps the player with no way out.
-- **Entropy-driven card coloring — RESOLVED.** Border + title + header rule
-  interpolate in **HSL** (not RGB — RGB blending between these hue pairs goes
-  muddy grey partway) across two segments split at `t = 0.8`: lightness-only,
-  then a hue rotation to the endgame colour. Same colour on all three panels
-  — it signals run state, not per-choice difference. Panel fill stays neutral
-  grey and the header text stays pure white, both deliberately, so text
-  contrast never depends on entropy.
-  - **`EntropyColors` is the single source of truth for this** (commit
-    `40dfb5f`). `ChoiceScreen` and the HUD both call
-    `EntropyColors.colorAt(entropy, entropyCap, phase)`. Anything else that
-    tints by run state should call it too rather than re-deriving the ramp —
-    that is the whole point of it being its own class. The six keyframes and
-    the `0.8` split live there and nowhere else.
-  - **Do not "simplify" `EntropyPalette.lerpHue`.** It takes the shortest arc
-    around the wheel on purpose. A naive lerp from hue 0 to 355 travels 355°
-    the long way and cycles the curse ramp through the entire rainbow. This
-    bug was caught twice — once in the HTML mockup, once guarded against here.
-    The curse ramp should span ~80° total and never enter the green/cyan band.
-  - The six `(h,s,l)` keyframes and the `0.8` split are named constants in
-    `EntropyPalette`, expected to be tuned after seeing them in-game.
-- **Whole-panel click targets.** Panels are a custom `AbstractWidget`, not
-  `Button`, so the entire card is clickable.
-- **Per-effect art is stubbed, not wired.** Each panel reserves a square image
-  slot and draws a dashed placeholder via `ChoicePanel#drawEffectImage`. That
-  method is the single swap-in point: when `EffectDefinition` gains an
-  optional texture `Identifier`, blit it there and return early — no layout
-  code changes.
+**1aj-1am. Adding a goal is not the inverse of vetoing one, and a MISSING attribute is not
+a zero.** Beast Whisperer's shape does not transfer to Beast Wrath: vetoing a goal that has
+already resolved a target needs only a predicate, while *adding* aggression needs the goals
+to exist, an attribute they can read, and an install point. `ATTACK_DAMAGE` is absent from
+`LivingEntity`/`Mob`/`Animal`'s suppliers alike, so `getAttribute` returns **null** (no
+instance for `addOrUpdateTransientModifier` to touch) and `getAttributeValue` **throws** —
+and `Mob.doHurtTarget` reads it first thing, so an armed cow without it crashes the tick.
+See `entropy-effects` 1aj-1am, including why the install point is `Mob`'s constructor
+rather than `registerGoals`.
 
-**How to check it without waiting on the 3-minute timer:**
-`/entropytest`, `/entropytest <good|bad> <entropy>`,
-`/entropytest <good|bad> <entropy> <cap>`, or append `long` to force compact
-descriptions. This drives the HUD cache too, so it exercises both surfaces —
-but note it is a *client-only* path and does not prove the server serialises
-anything.
-The colour/layout/description maths live in dependency-free static nested
-classes (`EntropyPalette`, `PanelLayout`, `DescriptionStyle`) specifically so
-a plain `java -cp build/classes/java/client` harness can exercise the real
-shipped code without booting Minecraft. Do that rather than testing a copy.
+**1ar-1aw. To change what a block PLACEMENT writes, modify the argument at `place`'s one
+`placeBlock` call — never `getPlacementState`** (`StandingAndWallBlockItem` overrides it and
+never calls super, so torches, signs and banners would silently escape). Replacing the state
+*before* `setBlock` means the original block entity is never created, so there is nothing to
+destroy; a chest item carries no contents, and the only real casualty is a **shulker box**,
+whose contents live in the item. Separately: **item components are datapack-bound, so a
+harness cannot construct an `ItemStack` at all** — design item predicates to take the
+component value, not the stack. See `entropy-effects` 1ar-1aw.
 
-**Remaining gaps:**
-- Description overflow is currently hard-clipped at 2 lines (compact) or 3
-  (normal). No ellipsis, no scroll, no tooltip. `DescriptionStyle
-  .resolveDescriptionStyle` is the one place to change if that strategy
-  should differ — it is isolated for exactly that reason.
-- `isPauseScreen()` returns `true` — the world freezes while the GUI is open.
-  Still a default rather than a decision. See Open Question 7.
-- No entropy progress bar or "X picks until next tier" indicator; the header
-  shows a bare `Entropy: n / cap`.
+**1ax/1ay. A BEFORE hook is invisible to the SECOND cell a placement writes, and "has a
+golden equivalent" is a registry question.** Doors, beds and double plants write their other
+half from `setPlacedBy`, which `place` reaches at offset 171 — *after* the `@ModifyArg` at 63
+— and dispatches on the block that reached the world, so a gold state means gold's empty
+`setPlacedBy` runs and the second cell is **never written**: one gold block where two belong,
+with nothing in the log. Those three families (and only those — `PitcherCropBlock`'s override
+is a bare `return`) get a scoped AFTER exception. Separately, the gold-material blocks that
+preserve a *function* a gold block would destroy are three, not two: pressure plates, rails,
+and **`GOLDEN_DANDELION`**, which only exists in this version. See `entropy-effects` 1ax-1ay.
 
-### Entropy cap on the wire — RESOLVED (commit `40dfb5f`)
-Previously listed as a known risk: the client could not learn the server's
-configured cap, so it assumed `DEFAULT_ENTROPY_CAP` and every colour would
-have been wrong under a non-default cap.
+**1az-1bb. `ADD_MULTIPLIED_BASE`'s "base" INCLUDES the `ADD_VALUE` pass — this file's own
+description of it was wrong twice.** `calculateValue` is `e += d * amount` where `d` is base
+*plus every `ADD_VALUE` modifier*, so a weapon is already folded in and **for a single modifier
+BASE and TOTAL are numerically identical**. The real difference is stacking (additive vs
+product), which is the `GRAVITY` argument on a new attribute. Separately: block friction is one
+local in `travelInAir` with **two** consumers — the acceleration *and* the decay — and changing
+only the first gives a sluggish player rather than a sliding one. See `entropy-effects` 1az-1bh,
+including why `@ModifyVariable` is the chainable shape when two sides share a target.
 
-`OpenChoicePayload` now carries `entropyCap` as a real record component with
-a matching codec component, and `EntropyManager` sends its configured cap.
-Verified by an encode/decode round-trip, not by inspection.
+**1an-1aq. FISH ARE NOT `Animal`, and an owner you have to RESOLVE is an owner you can
+lose.** `Cod -> AbstractFish -> WaterAnimal -> PathfinderMob` never passes through `Animal`,
+so a second attribute injection was needed; `Squid.travel(Vec3)` discards its argument
+entirely, so no navigation-driven goal can move a squid and it is excluded rather than
+faked; and the aquatic melee precedent is **Dolphin** (stock `MeleeAttackGoal`) not Guardian
+(a custom laser goal). For "is this mob mine", use `EntityReference.matches` — a bare UUID
+compare — never `OwnableEntity.getOwner()`, which resolves through the level and would read
+an owner in an unloaded chunk as *no* owner. See `entropy-effects` 1an-1aq.
 
-**If you add a field to a payload record, add its codec line in the same
-edit.** For `StreamCodec.composite` the arity is type-checked against the
-constructor reference, so a *missing* line fails to compile — but a line
-pointing at the *wrong getter* compiles fine and silently sends the wrong
-value. Round-trip it with each field set to a distinct value.
+**1z. The squared speed rule (1e/1l) is a MOB rule — it does NOT apply to players.**
+A mob's forward input is its own speed value (`Mob.setSpeed` also calls `setZza`); a
+player's comes from `ClientInput` as a normalised 1.0, so player ground speed is
+**linear** in `MOVEMENT_SPEED`. Applying the square to a player effect is wrong by
+nearly half. See `entropy-effects` for that, for Blindness's 20-tick fade floor, and
+for `DUST_PILLAR` as vanilla's own ground-shatter particle.
 
-### Persistent entropy HUD (`EntropyHud`) — new in `40dfb5f`
-Top-right `Entropy: N/cap` readout, tinted via `EntropyColors`, registered
-with `HudElementRegistry.addLast`. Neutral grey until the first payload
-arrives rather than guessing a phase; cache clears on disconnect.
+**1i. `moveTo(Entity, speed)` has NO stop distance -- it paths to the target's own
+block.** It is `createPath(entity, 1)`, so a "follow when further than 6" loop still
+delivers the follower to within a block of you; the threshold gates only *when a
+path is issued*, not where it ends, and nothing stops a path already running. Any
+standoff behaviour must navigate to a computed point on a ring and call
+`navigation.stop()` on arrival. See `entropy-effects` for the companion hold bands
+and the Audience state machine.
 
-Two things to know before changing it:
-- The `screen == null` guard is **required** — see the mapping note above;
-  the HUD really does render underneath open screens.
-- **The client only hears from the server when a pick opens.** There is no
-  entropy sync packet, so the HUD is a cache, not live state.
-  `noteChoiceSubmitted()` bumps the count locally on submit to avoid a
-  whole-interval stale readout, and the next payload re-syncs. If entropy
-  ever changes server-side for any reason *other* than a pick, the HUD will
-  be wrong until the next pick. A small periodic sync payload is the real
-  fix if that becomes true.
-- **Known overlap: vanilla draws status-effect icons in the top-right too.**
-  With active potion effects the readout and the icons will collide. Nudging
-  `y` down when `player.getActiveEffects()` is non-empty is the obvious fix;
-  it was left alone because the top-right position was specified.
+**2. A mixin's *shape* is part of its correctness when two sides share a target.**
+Slippery Grip's two mixins used to be `@ModifyVariable`s that both forced
+`setSprinting`'s argument false, which chained safely **only because both halves
+forced the same value**. Making each half *add or remove* an attribute modifier
+destroyed that: the common mixin runs on the client too (where `EffectHooks`
+answers "no effect" by design) and would delete what the client half just added,
+with the winner decided by injection order. **Rule: when a common and a client
+mixin target one method, scope each to the side it is the authority for** — here
+`player.level() instanceof ServerLevel` and `instanceof LocalPlayer` — so exactly
+one ever acts. This failure mode is invisible to the build.
 
-### Mixins — placeholders only, correctly scaffolded
-Both mixin stubs are unused example code, kept only to prove the pattern is
-wired up correctly for later signature effects (Mirror World's inverted
-input, Fisheye's forced FOV, Doppelganger's custom entity, etc.). Nothing to
-evaluate yet — there's no real mixin logic written.
 
-### Effect execution — does not exist yet
-This is the biggest missing piece overall. Picking an effect currently just
-logs it and sends a chat message. There is no `EffectExecutor`, no actual
-status-effect application, no wolf-spawning, no TNT-spawning, nothing that
-touches the actual game world. Every effect described in the design doc is
-still just a string in `EffectRegistry` with no behavior behind it.
+### Run lifecycle — FULLY BUILT, all three states and both end conditions
+`NOT_STARTED -> IN_PROGRESS -> ENDED`. The front half (the start gate, the modal
+panel, the keybind snapshot) shipped earlier; the `ENDED` half — the state, both
+reachable end conditions, the death counter and the end screen — is now built
+too. Per-piece status lives in the `entropy-design` skill.
+
+**`gameOver` is gone, and this is the reconciliation it needed.** For several
+sessions the project carried *two* unreconciled notions of "the run is over": a
+`gameOver` boolean set when entropy hit the cap (which predated run states), and
+a `RunState` enum that deliberately had no `ENDED` constant. There is now one.
+`RunState.ENDED` holds it, `RunOutcome` says which condition fired, and
+`EntropyManager.endRun(server, outcome)` is the **single entry point** every path
+goes through.
+
+- **`endRun` is idempotent, and that is correctness rather than tidiness.** Two
+  conditions can fire on the same tick — a dragon killed on the interval entropy
+  caps out. Whichever lands first stands; a win can never be overwritten by a
+  loss or the reverse.
+- **It voids any pending pick** (`waitingOnChoice` cleared, offer forgotten), so
+  the modal choice screen a player may be sitting on cannot be answered into a
+  finished run. The end screen replaces it client-side.
+- **The persisted `game_over` key is still READ, once, and never written true.**
+  That is the migration, and it is the one thing here that could silently break
+  an existing world: an old save can carry `game_over: true` with `run_state:
+  IN_PROGRESS`, so reading `run_state` alone would load every already-finished
+  run as live and immediately re-announce an ending the player already saw. The
+  legacy flag can *end* a run and never *start* one, and both directions are
+  asserted. Same rule as `second_chance_used`: the Java field is cosmetic, the
+  codec key is not.
+
+#### ENDED stops the LOOP, and deliberately nothing else
+This was recorded as "likely required, not yet decided" for every per-tick
+system. **Decided: the entropy loop only.** `EntropyManager.tick` is the sole
+per-tick system that consults the run state. The eight effect services —
+`GreenThumbGrowth`, `BlightTouchedTrample`, `SlashedPocketsSweep`,
+`DangerSenseGlow`, `UnstableSpawner`, `CreeperMagnetSpawner`, `CompanionService`,
+`EarthquakeService` — do **not**, and the harness asserts that absence per
+service so a later session has to meet the argument rather than quietly flip it.
+
+**Every one of them *could* gate cleanly** — each already calls
+`EntropyManager.get(server)`, so it is one line — which is what makes this a
+decision rather than a limitation. The argument against:
+
+> **Attribute effects and mixin/hook effects cannot be gated the same way at
+> all.** Modifiers are already on the player and nothing removes them on end;
+> every `EffectHooks` reader keys off `AcquiredEffects`. Gating only the
+> tick-driven subset would produce a run where Green Thumb has stopped growing
+> crops but Glutton still starves you and Nightmares still detonates beds — the
+> player's permanent effects half-working, with no rule they could infer.
+
+Making it consistent the other way means deactivating the whole acquired set on
+end, which contradicts both "effects are permanent" and the recorded decision
+that **the world stays fully playable after the run ends, with no lock**. So:
+the run stops, the effects you earned stay yours.
+
+#### The two end conditions
+| # | Trigger | Outcome | Hook |
+|---|---|---|---|
+| 1 | Entropy reaches the cap | `LOSS_ENTROPY_CAP` | `triggerPick`, before rolling |
+| 2 | First Ender Dragon kill | `WIN_DRAGON` | `ServerLivingEntityEvents.AFTER_DEATH` |
+| 3 | Death under Become Hardcore | *not built* | — |
+
+**Path 3 needs no architecture change.** It is one `RunOutcome` constant
+(`LOSS_HARDCORE_DEATH`, `win = false`) plus one `endRun` call from the death
+listener **that already exists** for the death counter. The constant is
+deliberately absent today, on the same rule that kept `ENDED` itself out until
+something could produce it, and the harness asserts both its absence *and* that
+every piece it will plug into is present.
+
+#### Dragon-death detection — Open Question 1, RESOLVED
+Read `RunEndDetector` before changing any of this.
+
+- **The hook is the Fabric event, not a mixin**, and that is load-bearing.
+  `ServerPlayer.die` is a complete reimplementation that **never calls
+  `super.die`** — there is not one `.die:(` reference anywhere in `ServerPlayer`.
+  A hand-rolled `LivingEntity.die` inject would therefore have counted **zero**
+  player deaths while applying perfectly (failure mode 1). Fabric already
+  absorbed this: `LivingEntityMixin` fires `AFTER_DEATH` from `LivingEntity.die`
+  and a *second* injection in `ServerPlayerMixin` fires it from
+  `ServerPlayer.die`. One event, two routes, exactly once each.
+- **"First kill only" is VANILLA'S record.** `EnderDragonFight
+  .hasPreviouslyKilledDragon()` is public, lives on a `SavedData`, and is what
+  vanilla itself uses to decide whether a dragon egg drops. Reached via
+  `ServerLevel.getDragonFight()`. **No parallel tracking.**
+- **The timing is the crux and it goes the right way.** `setDragonKilled` sets
+  that flag at its offset **79**; its caller is `EnderDragon.tickDeath` at offset
+  **409**, i.e. the end of the ~200-tick death animation — so `die()` and this
+  event fire ~200 ticks *earlier*, while the flag still holds its **pre-kill**
+  value. A re-fight of a resurrected dragon reads `true` and is declined.
+- **Known gap:** `EnderDragon` overrides `kill(ServerLevel)` to call `remove` and
+  `setDragonKilled` directly, bypassing `die()`. So **`/kill` on a dragon fires
+  nothing.** A dragon killed by damage always goes through `die`, so this is a
+  testing concern; `/entropyforcewin` covers it.
+
+#### The death counter
+One persisted int, all causes, incremented from the same `AFTER_DEATH` listener.
+**Not gated on the run state** — a death before Start or after the run ends is
+still a death this world saw — and **not frozen when the run ends**, because the
+run ending does not stop the world.
+
+#### The end screen
+`EndScreen`, pushed by `RunEndPayload` on the transition. Shows the outcome and
+**which condition fired**, final entropy against the run's configured cap, total
+picks, the full pick history, and the death count.
+
+- **Total picks is `history.size()`.** No new tracking, per the recorded
+  architecture — and a separate count could drift from the list it describes.
+- **Every value is server state the client cannot derive.** Entropy is only
+  synced when a pick opens, history only if asked for, and the death count never.
+  So the whole screen is fed from the payload.
+- **It is the one dismissible modal in this mod.** `ChoiceScreen` and
+  `StartScreen` are gates and refuse Escape; there is nothing to gate once the
+  run is over, and refusing Escape here *would be* the lock that was explicitly
+  decided against. Dismissing it closes it and does nothing else — no packet, no
+  state. It is shown once and has **no client-tick re-open guard**, unlike
+  `StartScreen`, for the same reason.
+
+### Pick history — BUILT
+`PickRecord` (pick number, phase, effect id/name/description, entropy at the
+time) appended in `onChoiceMade`, exposed via `EntropyManager.getHistory()`.
+
+- `entropyAtPick` is the value **before** that pick's +1 — i.e. the number the
+  player was looking at when they chose.
+- Name and description are stored as strings rather than an id reference on
+  purpose: history records what the player actually saw, so it must survive an
+  effect being retuned or deleted from the registry in a later version.
+- Fetched **on demand** via `HistoryRequestPayload` (C2S, zero bytes) →
+  `HistoryResponsePayload` (S2C, list), answered only to the player who asked.
+  Deliberately not ridden along on `OpenChoicePayload`, which every pick pays
+  for.
+- No screen or keybind yet. `/entropyhistory` requests it and the client prints
+  it to chat — interim path, replace with a real screen. It logged *only* until
+  the diagnostic session, which is why it looked broken in game; see "Debug
+  output has to reach the player".
+- `EffectPhase`'s wire codec now lives in `network/EntropyCodecs.java` since
+  two payloads need it. Sent by name, not ordinal, so reordering the enum
+  can't flip GOOD and BAD on the wire.
+
+### Debug commands — know which ones are REAL and which are FAKE
+This distinction has already cost one session. Read it before adding another
+test command.
+
+| Command | Side | Real pipeline? |
+|---|---|---|
+| `/entropyforcepick` | server | **YES** — the real path |
+| `/entropygrant <effect_id>` | server | **YES** — the real acquisition path |
+| `/entropystatus` | server | **YES** — reads real manager state |
+| `/entropyhistory` | client → server | **YES** — real request/response, prints to chat |
+| `/entropyforcewin` | server | **YES** — the real `endRun` |
+| `/entropyforceloss` | server | **YES** — the real `endRun` |
+| `/entropypreview` | client only | **NO** — hardcoded fake data |
+
+#### `/entropygrant` is the standard way to test a specific effect
+**Use this before building anything that depends on an effect working.** Rolling
+until the one effect you want to test happens to be offered is the friction that
+made the last two sessions ship effects that were never observed in game; this
+removes it. `/entropygrant green_thumb` and it is on, immediately.
+
+It is a **real** path, held to the same standard as `/entropyforcepick`:
+`EntropyManager.grantEffect` writes to the same `AcquiredEffects`, calls the same
+`setDirty()`, and dispatches through the same private `applyToAll` that
+`onChoiceMade` uses. A granted effect therefore persists across a save, is
+re-applied on death/rejoin/dimension change, and occupies its category for
+anti-stacking — indistinguishable from having picked it. If a future edit makes
+it construct its own `EffectContext` or call a behavior directly, that is a bug.
+
+Three properties that are deliberate, not incidental:
+
+- **It does not advance the run.** Entropy, pick count, the interval timer and
+  the history list are untouched. This is checkable rather than asserted:
+  `grantEffect`'s bytecode contains **one** call to `applyToAll`, one to
+  `acquired.add`, one to `setDirty`, and **zero** references to the `entropy`,
+  `pickCount`, `history` or `tickCounter` fields.
+
+  ```bash
+  javap -p -c -cp build/classes/java/main com.entropymod.entropy.EntropyManager \
+    | awk '/GrantResult grantEffect/{f=1} f&&/^$/{exit} f'
+  ```
+
+- **Re-granting is rejected, not re-applied.** Silently applying an
+  already-acquired effect a second time would exercise — and therefore could
+  hide — exactly the idempotency guarantee the whole respawn/rejoin design rests
+  on. The debug tool must not mask the class of bug it exists to find.
+- **A bad id is rejected out loud**, with the full list of valid ids sent to
+  chat, and the argument tab-completes from `EffectRegistry` live.
+
+**`/entropyforcepick` is the one that actually tests things.** It calls
+`EntropyManager.forcePick`, which delegates straight to the private
+`triggerPick` the tick loop uses — same entropy-cap check, same interval-scoped
+expiry, same phase alternation, same anti-stacking roll, same
+`OpenChoicePayload`. It bypasses the clock and *nothing else*. Its guards
+(the run state, `waitingOnChoice`) are exactly the ones `tick()` applies before
+it would reach `triggerPick`, so a forced pick can't reach a state a real
+interval firing couldn't. It returns a `PickTrigger` so the command can say *why*
+nothing opened instead of failing silently — and `RUN_NOT_STARTED` and
+`RUN_ALREADY_OVER` are deliberately distinct, because "you haven't started" and
+"it's over" are different things to tell a player.
+
+**If a future session makes this command roll its own choices or build its own
+payload, that is a bug**, not an optimisation — it would stop testing the thing
+it exists to test.
+
+Both server commands need permission level 2 (`LEVEL_GAMEMASTERS`), so **in
+singleplayer the world must have Allow Cheats: ON** or they won't appear.
+
+**Why `/entropypreview` got renamed (the trap, recorded so it isn't reset).**
+It used to be called `/entropytest`, and the name was actively misleading: it
+opens `ChoiceScreen` client-side with three hardcoded effect strings and never
+contacts the server. Clicking a card in it sends no `ChoiceMadePayload`, so it
+never reaches `onChoiceMade` — no history entry, nothing added to
+`AcquiredEffects`, no anti-stacking, no `EffectBehavior` firing. On screen it is **indistinguishable
+from a real pick**, which is exactly what made it dangerous: the effect-behavior
+architecture session shipped with the reasonable-sounding belief that
+`/entropytest` could verify it, and it could not.
+
+It still exists, deliberately — instant colour/layout checks across the whole
+entropy range with no world state are genuinely useful, and that's worth a
+command. The fix was the name, not the feature.
+
+**The general rule: a debug shortcut that fabricates data must say so in its
+name.** If you add another, name it `preview`/`mock`/`fake`, and if it's meant
+to test real behavior, make it call the real entry point rather than
+reconstructing what the real entry point does.
+
+### How to check this without booting Minecraft
+**`./gradlew harness` — the harness is in the repo now** (`src/harness/java`,
+its own source set, not wired into `build`). Every previous session rebuilt an
+equivalent by hand in a scratch directory and threw it away, which is why the
+same numbers kept being re-derived. For what it currently covers, read
+`HarnessMain` — the check list lives there and goes stale the moment it is
+restated anywhere else.
+
+**The start gate is tested by ticking with a `null` server, and that is the
+assertion rather than a shortcut.** `triggerPick` dereferences the server almost
+immediately, so a gate that let the loop run would blow up rather than quietly
+passing — and the loop is ticked 500 past the interval length to guarantee it
+would be reached. The counter staying at 0 is checked separately, because that is
+what distinguishes "paused" from "counting invisibly".
+
+**Clumsy Digger's table reads real durabilities out of `ToolMaterial` rather
+than hardcoding them** (`ToolMaterial.NETHERITE.durability()`, etc.), which is
+what makes it a check rather than a restatement — and it is how the COPPER tier
+was noticed. No bootstrap is needed: `ToolMaterial`'s constants are plain records
+over `TagKey`s. Copy that approach for anything else keyed on vanilla item data.
+
+**The payload round-trip is the model to copy for any future payload change.** It
+runs the real `StreamCodec` against `RegistryAccess.EMPTY` — no bootstrap needed,
+because every component codec is a string, varint or enum-by-name — and it checks
+**field by field with distinct values**, not with a whole-record `equals`. That
+matters concretely here: `entropy` and `entropyCap` are both ints and adjacent, so
+a swap would cancel out under equality and pass.
+
+It has already earned its keep once: an earlier session's first run failed on a
+hand-derived expected value for blighted wheat (the roll bound at speed 2.5 is
+11, not 12). The model was right and the number written next to it was not.
+
+**`Checks.hasMethod` is the counterpart to `Checks.hasConstant`** — it asserts a
+retired *code path* was deleted rather than left returning a neutral value. Both
+crop-hook retirements are pinned that way. Reach for it whenever a session removes
+a mechanic rather than changing one.
+
+Two things about it worth keeping:
+
+- **It reads constants by reflection, never by reference.** `static final`
+  primitives are inlined at the *caller's* compile time, so a harness that named
+  `GreenThumbBehavior.MULTIPLIER` directly would compare its own compiled-in
+  snapshot against itself and pass regardless of what ships.
+- **It is not in `build`.** A check that needs updating after a deliberate retune
+  must not block a release build; `./gradlew build` and `./gradlew harness` are
+  separate answers to separate questions.
+
+`AcquiredEffects`, `PickRecord`, `EffectRegistry` and the whole data model are
+**free of Minecraft imports on purpose** — same discipline as `EntropyPalette`
+on the client side. A plain `javac`/`java -cp build/classes/java/main` harness
+drives the no-repeat rule, both fallbacks, and pool exhaustion against the real
+shipped classes. Do that rather than testing a copy.
+
+For anything that *does* need Minecraft classes (codecs, attributes), a harness
+can still run headlessly against the full runtime classpath — call
+`SharedConstants.tryDetectVersion()` then `Bootstrap.bootStrap()` first or any
+registry access throws "Not bootstrapped". That is how the attribute clamps in
+the `entropy-effects` skill were established, and how the idempotency claim was
+proven against the real `AttributeInstance` rather than a mock.
+
+Three things are worth re-checking with a harness whenever they're touched:
+
+1. **The no-repeat rule and its fallbacks**, including deliberately draining a
+   phase's pool — that path is reachable in normal play, not an edge case.
+2. **The persistence codec.** A broken one doesn't misbehave subtly, it makes
+   the world fail to load. Round-trip it field by field with distinct values,
+   and check that a save missing newer fields still loads.
+3. **Idempotency.** Apply a modifier ten times and assert the value didn't move.
+   This is the guarantee the whole respawn/relog design rests on.
+
+What none of this can prove, and what still needs a real game session: that the
+effects are *felt* (speed, hearts, mining rate), that the mixins actually inject
+against the live game, that a real death/relog restores everything exactly once,
+that the chat messages actually appear, that expiry lands on the right wall-clock
+moment in a live server tick loop, and that the history request survives a real
+client↔server round trip. `/entropyforcepick` is what makes that session
+practical — without it you'd be waiting out a 3-minute interval per pick.
+
+Payload changes still need the field-by-field round-trip check described above;
+`HistoryResponsePayload` has been verified that way (a whole-record `equals`
+would still pass if two same-typed fields were swapped in a way that cancelled
+out).
+
+One structural claim *is* checkable without the game, and worth re-checking if
+`forcePick` is ever edited: that it delegates rather than duplicates. Its
+bytecode should contain exactly one call, to `triggerPick`, and
+`EntropyCommands` should reference nothing but `EntropyManager` accessors:
+
+```bash
+javap -p -c -cp build/classes/java/main com.entropymod.entropy.EntropyManager
+javap -p -c -cp build/classes/java/main com.entropymod.command.EntropyCommands
+```
+
+Note `runServer` needs `run/eula.txt` with `eula=true`, which isn't in the repo
+— accepting Mojang's EULA is the repo owner's call, not a tool's.
 
 ### Config (interval length, entropy cap) — fields exist, no player-facing surface
 `EntropyManager.setIntervalTicks()` / `setEntropyCap()` exist and work, but
@@ -349,19 +791,27 @@ there's no world-creation config screen, no GameRule, no command, and no
 config file wiring any of them up. Right now the only way to change these is
 to edit code and rebuild. See Open Question 5.
 
-### Persistence — not built
-Flagged above under `EntropyManager`, repeating here because it's a genuine
-gap, not a nice-to-have: without this, entropy resets every time the server
-restarts, which breaks the entire "race against entropy" premise for any
-session that spans more than one sitting.
-
 ---
 
 ## Part 2: Design invariants already locked in (don't relitigate these casually)
 
 - Categories for anti-stacking: `MOVEMENT, SURVIVAL, TOOL, COMBAT, GEAR,
-  COMPANION, UTILITY, DEBUFF, META` — max 1 active effect per category
-  *(rule stated, not yet enforced in code — see gaps above)*
+  COMPANION, UTILITY, DEBUFF, META` — max 1 active effect per category,
+  **enforced by exclusion from the roll pool, not by replacement** (a
+  conflicting option never appears in the three cards; picking never silently
+  cancels something you already have). *Now enforced in code.*
+- Effect behavior is one class per effect (`EffectBehavior` implementations in
+  `com.entropymod.entropy.behavior`), never a central switch. New effect =
+  new file + two registration lines, zero edits to existing code.
+- **All effects are permanent.** No durations, no expiry. `EffectDefinition` has
+  no duration field and must not regrow one as a magic int.
+- **`EffectBehavior.apply` must be idempotent** — it runs again on every
+  respawn, rejoin, and dimension change.
+- **No-repeat: an effect picked once never appears again that run.** Distinct
+  from anti-stacking (id vs category) and outranks it.
+- **`AcquiredEffects` is the single source of truth** for what the player has —
+  active set, already-picked set, and category occupancy all read from it, and
+  attribute state is derived from it rather than stored alongside it.
 - Phase alternates strictly GOOD → BAD → GOOD → BAD, never two of the same
   phase in a row
 - Bad effects below entropy 40 must be counterplay-survivable (no
@@ -374,104 +824,30 @@ session that spans more than one sitting.
 
 ---
 
-## Part 3: Open Questions — need your call before the next build session
-
-### 1. Win detection — how does the mod know you beat the dragon?
-Right now there's no code path that checks for Ender Dragon death at all.
-Options:
-- (a) Listen for the vanilla dragon-death event server-side, and when it
-  fires, stop the entropy timer and declare a win (regardless of current
-  entropy value)
-- (b) Same as (a), but also record *how much entropy was left* as a score,
-  so replays can be compared
-- (c) Something else — e.g. does re-entering the End count, or does it need
-  to be the *first* dragon kill specifically (re-fights of the resurrected
-  dragon shouldn't re-trigger a win)?
-
-### 2. Is this strictly singleplayer, or does it need to support multiplayer?
-This changes several things: whether entropy/picks are global or per-player,
-what happens to effects like "10 pet wolves" or "TNT spawns on you" when
-there are multiple players, and whether one player's open GUI should really
-block the whole server's timer. The code right now is written in a way that
-*works* for solo play but is structured as if multiplayer might happen
-(broadcasts to `PlayerLookup.all`). Worth deciding explicitly rather than
-finding out later.
-
-### 3. Should high entropy still occasionally roll low-tier effects?
-Current hard min/max cutoffs mean a Tier 1 effect can never appear again
-once entropy passes 25. Do you want:
-- (a) Keep hard cutoffs — simpler, tiers are fully distinct chapters
-- (b) Overlapping ranges (e.g. Tier 1 effects stay eligible up to entropy 60
-  at low weight) so there's some texture/variety even late-game
-- (c) Some other blending rule
-
-### 4. What's the config surface for interval length and entropy cap?
-Needs to be settable at world creation per your original ask ("3 min
-default, but a setting"). Options:
-- (a) Vanilla GameRules (simplest — works with `/gamerule`, no custom UI
-  needed, but feels less "designed")
-- (b) A real custom world-creation config screen (more polished, more work)
-- (c) A config file (Mod Menu / Cloth Config style) — editable outside a
-  running world, but doesn't fit "chosen at world creation" as naturally
-- (d) Some combination (GameRules for now, real screen later)
-
-### 5. Anti-stacking enforcement: replace, or exclude from the pool?
-Two different behaviors, both reasonable, need to pick one:
-- (a) When a new effect is picked, any existing effect in the same category
-  is immediately expired/replaced
-- (b) Categories with an already-active effect are excluded from the roll
-  pool entirely, so you never even see a conflicting option — forces
-  variety in what shows up in the 3 choices
-
-### 6. What happens when the game world runs out of legal effects?
-E.g. if every category is occupied by an active effect and entropy is at a
-point where no eligible effect exists in an unoccupied category — `rollThree`
-would return fewer than 3 (or 0) options. Needs a defined fallback (extend
-current effect's duration? force-expire the oldest active effect to make
-room? allow same-category rerolls as a last resort?).
-
-### 7. Should the GUI pause the world, or keep it running?
-`shouldPause()` is currently `true` (world freezes while you decide). This
-was a default, not a deliberate choice. Freezing removes time pressure from
-the decision itself (the *only* pressure is the entropy clock); not freezing
-adds "decide fast, mobs are still coming" stress on top. Which fits the
-intended feel better?
-
-### 8. Priority order for the "odd/signature" effects
-Several of the weird effects (Doppelganger, Mirror World, Fisheye,
-Colorblind Mode) each need their own chunk of real work (custom entity +
-skin injection, movement-input mixin, render-layer mixin, screen shader).
-Given limited session time, which 3-4 should be tackled first as the
-"proof the weird stuff works" batch, vs. which can wait indefinitely?
-
-### 9. `EffectExecutor` architecture — one big switch, or per-effect classes?
-Before writing any real effect behavior, worth locking in the pattern:
-- (a) One `EffectExecutor` class with a big `switch(effectId)` for
-  apply/remove — simplest, but grows unwieldy past ~30 effects
-- (b) Each effect is its own small class implementing an `apply(context)` /
-  `remove(context)` interface, registered alongside its `EffectDefinition` —
-  more files, but matches the "additive architecture" pattern you already
-  use in Puzzikub (new effect = new file, zero changes to existing code)
-
-### 10. Persistence scope — just the counters, or active effects too?
-Minimum viable persistence is just saving `entropy`, `pickCount`, and config
-values. But if a Curse like "Weapon Ban, 3 min" is active when the server
-restarts, should that survive the restart (remaining duration saved), or is
-it acceptable for in-flight temporary effects to just be lost on restart
-(only permanent/one-time effects and the counters need to survive)?
 
 ---
 
-## Suggested next session order
+## Where the rest of this document lives
 
-1. Resolve Questions 1, 2, 7, 9 first — these affect the *shape* of code
-   written in every other step, so deciding late means rework.
-2. Build `EffectExecutor` for the 11 Tier 1 effects using whichever pattern
-   Question 9 lands on.
-3. Wire up anti-stacking per Question 5.
-4. Add win detection per Question 1.
-5. Add persistence (Question 10) once the above is stable enough that it's
-   worth surviving a restart.
-6. Config surface (Question 4) — can happen in parallel, low-risk to defer.
-7. Port Tiers 2-4 into `EffectRegistry` (mechanical, low-risk, do anytime).
-8. Odd/signature effects, prioritized per Question 8.
+This file used to carry every verified finding inline and had grown past the size
+where Claude Code warns about a single memory file. The material was **moved, not
+deleted** — it now loads on demand instead of in every session.
+
+| Skill | Load it when | What's in it |
+|---|---|---|
+| `entropy-effects` | Implementing, tuning, renaming or debugging a specific effect; **writing any new mixin**; **spawning any entity** | Attribute clamps and floors, the javap-verified mixin target table, the `@Shadow` crash trap, Frost Walker's data-driven finding, `SafeSpawn`/`SpawnSchedule` (the shared groundwork every spawn-based effect must reuse), and the full derivation behind every shipped effect's constants |
+| `entropy-design` | Planning what to build next, deciding scope, resolving an open question | Per-component status and gaps, the run lifecycle, the three paths to `ENDED`, and all open design questions |
+| `entropy-mappings` | **Writing any Minecraft API code**; anything that won't compile; a method that "does not override" what it should | The Yarn→Mojang name table, the changed screen/HUD render pipeline, verified GUI/command/attribute signatures, and the `javap` recipe for checking a symbol against the shipped jar |
+
+**Two things to read before you start, because they will not be loaded for you:**
+
+- **Load `entropy-mappings` before you write Minecraft API code**, and reach for
+  it rather than a tutorial the moment something won't compile. Almost every
+  Minecraft snippet you'll find is written in Yarn names; this project uses
+  Mojang mappings and targets a version Yarn never covered, so the tutorial is
+  wrong before you start.
+- **Before writing a mixin → load `entropy-effects` first.** Three traps live
+  there that build green and fail at runtime: `@Shadow` does not resolve
+  inherited fields (hard crash on every world launch), a subclass may override
+  the method you targeted, and a value you successfully modify may be re-clamped
+  downstream. Compiling proves nothing about a mixin.

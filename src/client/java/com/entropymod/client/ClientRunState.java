@@ -1,0 +1,274 @@
+package com.entropymod.client;
+
+import com.entropymod.entropy.KeybindSnapshot;
+import com.entropymod.entropy.MovementScramble;
+import com.entropymod.entropy.RunState;
+import com.entropymod.entropy.behavior.DoubleJumpBehavior;
+import com.entropymod.entropy.behavior.LooseFootingBehavior;
+import com.entropymod.entropy.behavior.SlickBehavior;
+import com.entropymod.entropy.behavior.OreSenseBehavior;
+import com.entropymod.entropy.behavior.RandomJumpBehavior;
+import com.entropymod.entropy.behavior.RandomizedControlsBehavior;
+import com.entropymod.entropy.behavior.SlipperyGripBehavior;
+import com.entropymod.entropy.behavior.UpsideDownCameraBehavior;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Random;
+import java.util.Set;
+
+/**
+ * The client's copy of which effects the run holds, fed by
+ * {@code ClientEffectsPayload}.
+ *
+ * <p><b>A cache, not the truth.</b> The server owns the acquired set; this is
+ * only what the client was last told, exactly like {@link EntropyHud}'s entropy
+ * readout. It is cleared on disconnect so the next world cannot inherit it, and
+ * the three effects that read it all degrade to vanilla behaviour when it is
+ * empty -- which is the correct state for a vanilla server, a mod-less server,
+ * or the moment before the first sync arrives.
+ *
+ * <p>Read from {@code KeyboardInputMixin} and {@code CameraMixin}, both of which
+ * run on the render/client thread every tick or frame, so every accessor here is
+ * a plain field read with no allocation.
+ */
+public final class ClientRunState {
+
+	private static final Set<String> EFFECTS = new HashSet<>();
+	private static String moveScramble = "";
+
+	/**
+	 * The run's lifecycle state, as last reported by {@code RunSyncPayload}.
+	 *
+	 * <p>Defaults to {@code IN_PROGRESS}, <b>not</b> {@code NOT_STARTED</b>, and
+	 * the asymmetry is deliberate: this value's only job on the client is deciding
+	 * whether to throw up a modal, un-escapable start panel. Defaulting to
+	 * "not started" would mean any server that never sends this payload -- a
+	 * vanilla server, an older Entropy Mod server, or the gap before the first
+	 * packet arrives -- traps the player behind a panel whose button talks to
+	 * nobody. Defaulting the other way degrades to ordinary vanilla play.
+	 */
+	private static RunState runState = RunState.IN_PROGRESS;
+
+	/**
+	 * This player's movement keys as frozen at Start, mirrored from the server.
+	 *
+	 * <p>{@link KeybindSnapshot#EMPTY} means "the server holds none for me", which
+	 * is both the cue to capture one and the signal that Randomized Movement
+	 * Controls must fall back to permuting live bindings.
+	 */
+	private static KeybindSnapshot keybinds = KeybindSnapshot.EMPTY;
+
+	/** Ticks until the next forced jump. Only meaningful while Random Jump is held. */
+	private static int jumpCountdown = 0;
+	private static final Random RANDOM = new Random();
+
+	/**
+	 * Ticks left in an Earthquake tremor's movement lock. Zero means free to move.
+	 *
+	 * <p>Set by {@code TremorLockPayload} and counted down once per client tick. It is a
+	 * countdown rather than a flag on purpose: a lost "unlock" packet would otherwise
+	 * paralyse the player until they relogged, whereas a duration that expires by itself
+	 * can only ever fail in the harmless direction. See {@code TremorLockPayload}.
+	 */
+	private static int tremorLockTicks = 0;
+
+	/** Replaces the cached view. Called from the payload receiver on the client thread. */
+	public static void update(List<String> effectIds, String scramble) {
+		EFFECTS.clear();
+		EFFECTS.addAll(effectIds);
+		moveScramble = MovementScramble.isValid(scramble) ? scramble : "";
+		if (hasRandomJump() && jumpCountdown <= 0) {
+			scheduleNextJump();
+		}
+	}
+
+	/** Replaces the cached run state and this player's frozen keybinds. */
+	public static void updateRun(RunState state, KeybindSnapshot snapshot) {
+		runState = state == null ? RunState.IN_PROGRESS : state;
+		keybinds = snapshot == null ? KeybindSnapshot.EMPTY : snapshot;
+	}
+
+	public static RunState runState() {
+		return runState;
+	}
+
+	/** This player's frozen movement keys, or {@link KeybindSnapshot#EMPTY}. */
+	public static KeybindSnapshot keybinds() {
+		return keybinds;
+	}
+
+	/**
+	 * Whether the server is waiting for this client to report its keybinds: the
+	 * run is live and the server holds no snapshot for this player.
+	 *
+	 * <p>This one predicate covers every capture case except the player who
+	 * actually clicks Start -- a second player already online when the run began,
+	 * and anyone joining afterwards -- which is why no "send me your keybinds"
+	 * request packet exists.
+	 */
+	public static boolean needsKeybindCapture() {
+		return runState == RunState.IN_PROGRESS && !keybinds.isPresent();
+	}
+
+	/** Drops everything. Registered on DISCONNECT -- see {@link EntropyHud#reset}. */
+	public static void reset() {
+		EFFECTS.clear();
+		moveScramble = "";
+		jumpCountdown = 0;
+		tremorLockTicks = 0;
+		// Back to the permissive defaults, for the same reason they are the
+		// defaults: the next server may not speak this protocol at all.
+		runState = RunState.IN_PROGRESS;
+		keybinds = KeybindSnapshot.EMPTY;
+	}
+
+	// ------------------------------------------------------------------
+
+	/**
+	 * The active scramble, or {@code ""} for vanilla controls.
+	 *
+	 * <p>Requires <em>both</em> the effect and a valid permutation. A run that
+	 * holds the effect but somehow has no scramble moves normally rather than
+	 * throwing inside input handling.
+	 */
+	public static String moveScramble() {
+		return EFFECTS.contains(RandomizedControlsBehavior.ID) ? moveScramble : "";
+	}
+
+	/**
+	 * Slippery Grip, read by {@code ClientSprintMixin}.
+	 *
+	 * <p>The client needs its own answer here rather than deferring to the server:
+	 * applying the same compensating speed modifier locally is what stops the
+	 * client predicting movement at vanilla's full sprint bonus while the server
+	 * runs at half. See that mixin.
+	 */
+	public static boolean halvesSprintSpeed() {
+		return EFFECTS.contains(SlipperyGripBehavior.ID);
+	}
+
+	/**
+	 * Double Jump, read by {@code ClientDoubleJump}.
+	 *
+	 * <p>The client needs its own answer because player jumping is entirely
+	 * client-driven -- {@code ServerPlayer} never writes {@code jumping}, so
+	 * there is no server half that could authorise this.
+	 */
+	public static boolean hasDoubleJump() {
+		return EFFECTS.contains(DoubleJumpBehavior.ID);
+	}
+
+	/**
+	 * Ore Sense, read by {@code OreSenseScan}.
+	 *
+	 * <p>NOTE: the effect is not registered in {@code EffectRegistry} yet -- its
+	 * renderer is unbuilt, so this currently always returns false in practice.
+	 * The scan and this accessor are complete and tested; see
+	 * {@code OreSenseBehavior}.
+	 */
+	public static boolean hasOreSense() {
+		return EFFECTS.contains(OreSenseBehavior.ID);
+	}
+
+	/**
+	 * Slick, read by {@code ClientFrictionMixin}.
+	 *
+	 * <p>The client needs its own answer, and here that is stronger than the
+	 * Slippery Grip case: <b>friction is not an attribute</b>, so there is nothing
+	 * for {@code ClientboundUpdateAttributesPacket} to carry and no eventual
+	 * server sync to converge on. The client simulates its own movement, so
+	 * without this the two sides disagree about where the player ends up and the
+	 * result reads as rubber-banding rather than as ice.
+	 */
+	public static boolean hasSlick() {
+		return EFFECTS.contains(SlickBehavior.ID);
+	}
+
+	/**
+	 * Loose Footing, read by {@code ClientEdgeSafetyMixin}.
+	 *
+	 * <p>Edge-stop clamps the movement vector inside {@code Entity.move}, which for
+	 * a player runs on the client -- so this is the half that is actually felt. The
+	 * server half exists only because vanilla's guard also accepts
+	 * {@code MoverType.PLAYER}, which is how the server applies an incoming
+	 * position packet.
+	 */
+	public static boolean hasLooseFooting() {
+		return EFFECTS.contains(LooseFootingBehavior.ID);
+	}
+
+	public static boolean hasUpsideDownCamera() {
+		return EFFECTS.contains(UpsideDownCameraBehavior.ID);
+	}
+
+	public static boolean hasRandomJump() {
+		return EFFECTS.contains(RandomJumpBehavior.ID);
+	}
+
+	/**
+	 * Counts down the forced-jump timer and reports whether this tick should jump.
+	 *
+	 * <p>Called once per client tick from {@code KeyboardInputMixin}, which is the
+	 * only place in the client that reliably runs exactly once per tick <em>and</em>
+	 * immediately before vanilla reads the jump press. See that class for why the
+	 * timing matters.
+	 */
+	public static boolean tickForcedJump() {
+		if (!hasRandomJump()) {
+			jumpCountdown = 0;
+			return false;
+		}
+		if (jumpCountdown <= 0) {
+			scheduleNextJump();
+		}
+		if (--jumpCountdown > 0) {
+			return false;
+		}
+		scheduleNextJump();
+		return true;
+	}
+
+	/**
+	 * Starts (or restarts) the Earthquake movement lock for {@code ticks} ticks.
+	 *
+	 * <p>Assignment, not accumulation -- a second tremor arriving while one is somehow
+	 * still counting down replaces the remainder rather than adding to it, so the lock
+	 * can never outlast one tremor's worth of paralysis however many packets arrive.
+	 */
+	public static void beginTremorLock(int ticks) {
+		tremorLockTicks = Math.max(0, ticks);
+	}
+
+	/**
+	 * True while the player is rooted by a tremor. Read by
+	 * {@code ClientImmobileMixin}.
+	 */
+	public static boolean isTremorLocked() {
+		return tremorLockTicks > 0;
+	}
+
+	/**
+	 * Counts the lock down by one tick. Called once per client tick from
+	 * {@code EntropyModClient}'s {@code END_CLIENT_TICK} handler.
+	 *
+	 * <p>Deliberately NOT driven from {@code KeyboardInputMixin} the way
+	 * {@code tickForcedJump} is. That one has to run immediately before vanilla reads
+	 * the jump press, because it fakes a press; this one only has to be accurate to a
+	 * tick, and {@code isImmobile()} is read from {@code aiStep} rather than from input
+	 * handling, so there is no ordering requirement to honour.
+	 */
+	public static void tickTremorLock() {
+		if (tremorLockTicks > 0) {
+			tremorLockTicks--;
+		}
+	}
+
+	private static void scheduleNextJump() {
+		jumpCountdown = RandomJumpBehavior.MIN_INTERVAL_TICKS
+				+ RANDOM.nextInt(RandomJumpBehavior.MAX_INTERVAL_TICKS
+						- RandomJumpBehavior.MIN_INTERVAL_TICKS + 1);
+	}
+
+	private ClientRunState() {}
+}
