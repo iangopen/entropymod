@@ -4,9 +4,23 @@ build/
 out/
 classes/
 
+# Compiled output outside build/
+*.class
+
 # Minecraft dev runtime (runClient / runServer)
+# run/ holds the dev client's saves/, logs/, crash-reports/ and options.txt.
 run/
 logs/
+*.log
+crash-reports/
+
+# World saves, wherever they end up (runServer writes world/ under run/;
+# a copied-in test world can land at the root)
+saves/
+world/
+
+# Claude Code: per-machine permission settings (skills under .claude/ are tracked)
+.claude/settings.local.json
 
 # IDE
 .idea/
