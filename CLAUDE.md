@@ -13,8 +13,47 @@ cap (default 100).
 
 ---
 
-## Repository state (verified 2026-11-02)
+## Repository state (verified 2026-11-03)
 
+### Branches: the merge is staged, not landed
+- **`merge/lineage-into-main` holds everything.** It is `main` (`a4b5826`) plus a `--no-ff` merge of
+  `run-lifecycle-ended` (`ba1319c`, merge commit `460a615`), then `.gitignore`, `docs/history.md` and README
+  commits. **`main` itself is untouched and still holds the early skeleton** until the owner tests in game and
+  fast-forwards it. The full branch map and the ancestry proof are in `docs/history.md`.
+- **`run-lifecycle-ended` contains every other branch.** All 30 feature branches are ancestors of it. Merging any
+  other tip would drop work.
+- **Code on the merge branch is byte-identical to `ba1319c`.** `git diff ba1319c merge/lineage-into-main -- src
+  build.gradle gradle.properties settings.gradle gradle gradlew gradlew.bat` is empty. Only docs, `.gitignore` and
+  the `entropy-mappings` skill differ.
+- **Build/harness on 2026-11-03: NOT RUN.** Available memory read 1,117 / 937 / 1,241 MB, under the 2,000 MB floor
+  for a Gradle build, so no jar was produced. The last real result is 2026-11-02 on `ba1319c`, the same code:
+  `gradlew build` passed and `gradlew harness` reported 2470 passed, 0 failed. Rebuild before an in-game test.
+- `.gitignore` now also covers `*.class`, `*.log`, `crash-reports/`, `saves/`, `world/` and
+  `.claude/settings.local.json`. `git ls-files` holds no generated output. `gradle/wrapper/gradle-wrapper.jar` is
+  the wrapper and is meant to be tracked.
+
+### Counts, from source (re-count with these, don't restate from memory)
+| What | Count | Source |
+|---|---|---|
+| Registered effects | **72** (34 GOOD, 38 BAD; Tier 1 at 0-25: 17+17; Tier 2 at 25-60: 17+21) | `register("id", ...)` calls in `EffectRegistry.java` after stripping comments; 72 unique ids, 72 matching `register` lines in `EffectBehaviors.java` |
+| Behavior classes with an `ID` | 73 | `OreSenseBehavior` (`ore_sense`) exists but is not registered (renderer blocked) |
+| Mixin classes | **47** (38 common, 9 client) | `grep -rl '^\s*@Mixin(' src` |
+| Mixin config entries | **47** (38 + 9) | `entropymod.mixins.json` `mixins` + `entropymod.client.mixins.json` `client`; names match the classes 1:1 |
+| ...of which template placeholders | 2 | `EntropyModMixin`, `EntropyModClientMixin`: empty `@Inject` bodies kept as examples. 45 do real work, one of them (`LlamaStrengthAccessor`) an `@Invoker` and one (`FoodDataOwnerMixin`) a duck-interface field |
+| Network payloads | **10** (6 S2C: OpenChoice, HistoryResponse, ClientEffects, TremorLock, RunSync, RunEnd; 4 C2S: ChoiceMade, HistoryRequest, RerollRequest, KeybindSnapshot) | `PayloadTypeRegistry` calls in `EntropyMod.java`; each has a receiver on the other side |
+| Persisted keys | 15 top-level in `EntropyManager.CODEC`, two of them nested (`meta`: 6 keys, `run_end`: 2) | `SavedData` `entropymod:entropy_run` on the overworld |
+| Re-application hooks | 3: `ServerPlayerEvents.JOIN` (relog), `AFTER_RESPAWN` (death), `AFTER_PLAYER_CHANGE_LEVEL` (portal) | `EntropyMod.java`, all calling `reapplyTo` → `reapplyAll` + `CompanionService.gather` + sync |
+
+### In-game evidence, per effect (there is no per-effect ledger)
+Neither this file nor the skills keep a "seen working in game" list. The `entropy-effects` skill does record
+**in-game reports** for these effects: Heavy Footsteps, Magnetic Boots, Second Guess, Slippery Grip, Double Jump,
+Unstable, Creeper Magnet, The Entourage, The Audience, Earthquake. Each was a bug found in play and then fixed. The
+fixes are harness-checked, but the record doesn't say whether each fix was re-observed in game. The other 62 effects
+have no recorded in-game observation: build plus the harness only (the harness references 56 of the 72 by id or
+class). **Known content gap:** no effect is eligible above entropy 60, so `triggerPick` returns
+`NO_ELIGIBLE_EFFECTS` and the run stalls at 61. With the default cap of 100 the cap-loss can't be reached in play.
+
+### History rewrite and restore
 - **History rewritten 2026-11-02.** Committed `build/`, `run/`, `.gradle/`, `.idea/` and `logs/` were
   removed from every commit with `git filter-repo`, and the result was force-pushed with per-branch leases,
   atomically. All 64 commits and 31 branches were kept, with authors and dates intact. Every commit hash changed.
@@ -24,9 +63,6 @@ cap (default 100).
   Dependabot alerts, secret scanning and push protection are on.
 - **Any clone made before 2026-11-02 is old history. Don't push from it, and don't pull it into a new clone.**
   Re-clone instead. The old local clone is `C:\devwork\github projects\entropymod-old`, with its push URL disabled.
-- **`main` is behind the feature branches.** The newest work is on `run-lifecycle-ended`, which also has a
-  newer copy of this file. Still open: merging the lineage into `main`, bringing `.gitignore` onto
-  `run-lifecycle-ended`, and rewriting the README.
 - PR #1 (Spagles) was closed by the rewrite. Its 3 commits are saved as patches in
   `C:\devwork\backups\entropymod-2026-10-25\pr1-spagles-patches\` (apply with `git am -3`).
 
@@ -246,8 +282,10 @@ distinct failure modes, all real, none visible to the build:
    bug; the wrong magnitude, and indistinguishable from a bug from the player's
    seat.
 
-**The diagnostic that actually resolved all of this was `run/logs/latest.log`,
-which is in the repo.** It is the single highest-value evidence source in the
+**The diagnostic that actually resolved all of this was `run/logs/latest.log`.**
+*(It was committed then. Since the 2026-11-02 rewrite `run/` is ignored, so the log
+exists only locally after a `runClient`. The pre-rewrite copies are in the backup
+bundle.)* It is the single highest-value evidence source in the
 project and it beats reasoning from the source every time — it proved the
 attribute registered, the effects applied with no error, all 28 behaviors wired,
 and the entire history round-trip working. **Read it before forming a
