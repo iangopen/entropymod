@@ -6,6 +6,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Scales incoming damage for Iron Skin / Fragile.
@@ -30,6 +31,7 @@ public abstract class LivingEntityDamageMixin {
 
 	@ModifyVariable(method = "hurtServer", at = @At("HEAD"), argsOnly = true)
 	private float entropymod$scaleIncomingDamage(float amount) {
+		MixinProbe.LIVING_ENTITY_DAMAGE.hit();
 		if (!((Object) this instanceof Player player)) {
 			return amount;
 		}

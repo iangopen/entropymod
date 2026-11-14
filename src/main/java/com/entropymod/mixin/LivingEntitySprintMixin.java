@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slippery Grip, server side: sprinting is allowed, and made slow.
@@ -45,6 +46,7 @@ public abstract class LivingEntitySprintMixin {
 
 	@Inject(method = "setSprinting", at = @At("TAIL"))
 	private void entropymod$slipperyGrip(boolean sprinting, CallbackInfo ci) {
+		MixinProbe.LIVING_ENTITY_SPRINT.hit();
 		if ((Object) this instanceof Player player && player.level() instanceof ServerLevel) {
 			SlipperyGripSprint.update(player, EffectHooks.halvesSprintSpeed(player));
 		}

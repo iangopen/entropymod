@@ -17,6 +17,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Gives normally passive animals the ability to attack -- the goal half of Beast
@@ -83,6 +84,7 @@ public abstract class MobPassiveAggressionMixin {
 
 	@Inject(method = "<init>", at = @At("TAIL"))
 	private void entropymod$armPassiveAnimals(EntityType<? extends Mob> type, Level level, CallbackInfo ci) {
+		MixinProbe.MOB_PASSIVE_AGGRESSION.hit();
 		if (!(level instanceof ServerLevel)) {
 			return;
 		}

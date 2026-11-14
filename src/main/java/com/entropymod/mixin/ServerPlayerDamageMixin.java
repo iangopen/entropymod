@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Crouch Invincibility (cancel the hit) and Flamboyant (make fire lethal).
@@ -54,6 +55,7 @@ public abstract class ServerPlayerDamageMixin {
 	@Inject(method = "hurtServer", at = @At("HEAD"), cancellable = true)
 	private void entropymod$crouchInvincibility(ServerLevel level, DamageSource source, float amount,
 											   CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.SERVER_PLAYER_DAMAGE__CROUCH_INVINCIBILITY.hit();
 		if (EffectHooks.ignoresAllDamage((ServerPlayer) (Object) this)) {
 			// false == "no damage was taken", which is what vanilla returns when a
 			// hit is refused. Returning true would make attackers believe they
@@ -64,6 +66,7 @@ public abstract class ServerPlayerDamageMixin {
 
 	@ModifyVariable(method = "hurtServer", at = @At("HEAD"), argsOnly = true)
 	private float entropymod$flamboyant(float amount, ServerLevel level, DamageSource source) {
+		MixinProbe.SERVER_PLAYER_DAMAGE__FLAMBOYANT.hit();
 		return EffectHooks.fireDamage((ServerPlayer) (Object) this, source, amount);
 	}
 }

@@ -9,6 +9,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Cancels knockback from projectiles only, for Iron Will.
@@ -70,6 +71,7 @@ public abstract class LivingEntityKnockbackMixin {
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/LivingEntity;knockback(DDD)V"))
 	private void entropymod$knockback(LivingEntity target, double strength, double x, double z,
 									  ServerLevel level, DamageSource source, float amount) {
+		MixinProbe.LIVING_ENTITY_KNOCKBACK.hit();
 		// Iron Will: the VICTIM is a player who ignores projectile shove.
 		if (target instanceof Player player
 				&& source.is(DamageTypeTags.IS_PROJECTILE)

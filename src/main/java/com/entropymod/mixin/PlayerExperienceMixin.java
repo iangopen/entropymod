@@ -5,6 +5,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Scales experience gained for Fast Learner / Slow Learner.
@@ -23,6 +24,7 @@ public abstract class PlayerExperienceMixin {
 
 	@ModifyVariable(method = "giveExperiencePoints", at = @At("HEAD"), argsOnly = true)
 	private int entropymod$scaleExperience(int amount) {
+		MixinProbe.PLAYER_EXPERIENCE.hit();
 		Player player = (Player) (Object) this;
 		return EffectHooks.scaleAmount(amount, EffectHooks.experienceMultiplier(player));
 	}

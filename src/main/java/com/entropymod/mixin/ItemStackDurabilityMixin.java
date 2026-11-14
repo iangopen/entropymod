@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 import java.util.function.Consumer;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Adds occasional extra tool wear for Clumsy Digger.
@@ -51,6 +52,7 @@ public abstract class ItemStackDurabilityMixin {
 			ordinal = 0)
 	private int entropymod$extraToolWear(int amount, int ignoredAmount, ServerLevel level,
 										  ServerPlayer player, Consumer<Item> onBreak) {
+		MixinProbe.ITEM_STACK_DURABILITY.hit();
 		if (player == null) {
 			return amount;
 		}

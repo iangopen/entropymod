@@ -8,6 +8,7 @@ import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slippery Grip's sprint-jump impulse, client side. The twin of
@@ -37,6 +38,7 @@ public abstract class ClientSprintJumpMixin {
 					target = "Lnet/minecraft/world/entity/LivingEntity;addDeltaMovement(Lnet/minecraft/world/phys/Vec3;)V"),
 			index = 0)
 	private Vec3 entropymod$slipperyGripSprintJumpClient(Vec3 impulse) {
+		MixinProbe.CLIENT_SPRINT_JUMP.hit();
 		if ((Object) this instanceof LocalPlayer player && ClientRunState.halvesSprintSpeed()) {
 			return impulse.scale(SlipperyGripSprint.sprintScaleFor(player));
 		}

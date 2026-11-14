@@ -6,6 +6,7 @@ import net.minecraft.world.phys.AABB;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Widens the item/XP pickup box for Magnetic Boots.
@@ -37,6 +38,7 @@ public abstract class PlayerItemPickupMixin {
 			method = "aiStep",
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/world/phys/AABB;inflate(DDD)Lnet/minecraft/world/phys/AABB;"))
 	private AABB entropymod$widenPickupBox(AABB box, double x, double y, double z) {
+		MixinProbe.PLAYER_ITEM_PICKUP.hit();
 		double scale = ((Player) (Object) this).getAttributeValue(EntropyAttributes.PICKUP_RANGE);
 		return box.inflate(x * scale, y * scale, z * scale);
 	}

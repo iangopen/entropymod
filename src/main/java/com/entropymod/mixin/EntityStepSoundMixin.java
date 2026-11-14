@@ -7,6 +7,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Makes footsteps louder for Heavy Footsteps -- part (a) of that effect.
@@ -35,6 +36,7 @@ public abstract class EntityStepSoundMixin {
 			method = "playStepSound",
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/Entity;playSound(Lnet/minecraft/sounds/SoundEvent;FF)V"))
 	private void entropymod$louderFootsteps(Entity entity, SoundEvent sound, float volume, float pitch) {
+		MixinProbe.ENTITY_STEP_SOUND.hit();
 		float scale = entity instanceof Player player
 				? EffectHooks.stepSoundVolumeMultiplier(player)
 				: 1.0f;

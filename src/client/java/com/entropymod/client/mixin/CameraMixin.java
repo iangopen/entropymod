@@ -6,6 +6,7 @@ import org.joml.Quaternionf;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Upside-Down Camera. Rolls the view 180 degrees about the forward axis.
@@ -64,6 +65,7 @@ public abstract class CameraMixin {
 			at = @At(value = "INVOKE",
 					target = "Lorg/joml/Quaternionf;rotationYXZ(FFF)Lorg/joml/Quaternionf;"))
 	private Quaternionf entropymod$rollCamera(Quaternionf rotation, float yaw, float pitch, float roll) {
+		MixinProbe.CAMERA.hit();
 		return rotation.rotationYXZ(yaw, pitch,
 				ClientRunState.hasUpsideDownCamera() ? ROLL_RADIANS : roll);
 	}

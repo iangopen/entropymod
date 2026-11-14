@@ -7,6 +7,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Earthquake's movement paralysis -- the SERVER half.
@@ -76,6 +77,7 @@ public abstract class PlayerImmobileMixin {
 
 	@Inject(method = "isImmobile", at = @At("RETURN"), cancellable = true)
 	private void entropymod$tremorParalysis(CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.PLAYER_IMMOBILE.hit();
 		if (cir.getReturnValueZ()) {
 			return;
 		}

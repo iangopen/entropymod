@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Reverse Midas: replaces the state a placement is about to write with a gold
@@ -57,6 +58,7 @@ public abstract class BlockItemPlacementMixin {
 							+ "Lnet/minecraft/world/level/block/state/BlockState;)Z"),
 			index = 1)
 	private BlockState entropymod$placeGoldInstead(BlockPlaceContext context, BlockState state) {
+		MixinProbe.BLOCK_ITEM_PLACEMENT__PLACE_GOLD_INSTEAD.hit();
 		return EffectHooks.reverseMidasPlacement(context, state);
 	}
 
@@ -81,6 +83,7 @@ public abstract class BlockItemPlacementMixin {
 	@Inject(method = "place", at = @At("RETURN"))
 	private void entropymod$goldBothHalves(
 			BlockPlaceContext context, CallbackInfoReturnable<InteractionResult> cir) {
+		MixinProbe.BLOCK_ITEM_PLACEMENT__GOLD_BOTH_HALVES.hit();
 		EffectHooks.reverseMidasAfterPlacement(context, cir.getReturnValue());
 	}
 }

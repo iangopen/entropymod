@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Cuts what any food source restores, for Glutton.
@@ -51,11 +52,13 @@ public abstract class FoodDataRestoreMixin {
 
 	@ModifyVariable(method = "add", at = @At("HEAD"), argsOnly = true, index = 1)
 	private int entropymod$gluttonNutrition(int nutrition) {
+		MixinProbe.FOOD_DATA_RESTORE__GLUTTON_NUTRITION.hit();
 		return entropymod$reduced() ? GluttonBehavior.reduceNutrition(nutrition) : nutrition;
 	}
 
 	@ModifyVariable(method = "add", at = @At("HEAD"), argsOnly = true, index = 2)
 	private float entropymod$gluttonSaturation(float saturation) {
+		MixinProbe.FOOD_DATA_RESTORE__GLUTTON_SATURATION.hit();
 		return entropymod$reduced() ? GluttonBehavior.reduceSaturation(saturation) : saturation;
 	}
 

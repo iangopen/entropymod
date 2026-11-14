@@ -6,6 +6,7 @@ import net.minecraft.world.entity.LivingEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Vampire Rules: reads the damage a player actually landed on something else.
@@ -56,6 +57,7 @@ public abstract class LivingEntityDamageDealtMixin {
 							+ "(Lnet/minecraft/world/damagesource/DamageSource;F)V"),
 			index = 1)
 	private float entropymod$vampireRules(DamageSource source, float damage) {
+		MixinProbe.LIVING_ENTITY_DAMAGE_DEALT.hit();
 		EffectHooks.vampireDrain(source.getEntity(), (LivingEntity) (Object) this, damage);
 		return damage;
 	}

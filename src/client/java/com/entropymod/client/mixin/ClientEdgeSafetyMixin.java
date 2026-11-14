@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * The client half of Loose Footing. See {@code PlayerEdgeSafetyMixin} for the
@@ -38,6 +39,7 @@ public abstract class ClientEdgeSafetyMixin {
 	@Inject(method = "maybeBackOffFromEdge", at = @At("HEAD"), cancellable = true)
 	private void entropymod$looseFootingClient(Vec3 movement, MoverType type,
 											   CallbackInfoReturnable<Vec3> cir) {
+		MixinProbe.CLIENT_EDGE_SAFETY.hit();
 		if ((Object) this instanceof LocalPlayer && ClientRunState.hasLooseFooting()) {
 			cir.setReturnValue(movement);
 		}

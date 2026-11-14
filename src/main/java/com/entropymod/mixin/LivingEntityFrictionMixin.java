@@ -8,6 +8,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Forces ice's friction onto whatever this player is standing on, for Slick.
@@ -53,6 +54,7 @@ public abstract class LivingEntityFrictionMixin {
 
 	@ModifyVariable(method = "travelInAir", at = @At("STORE"), index = 3)
 	private float entropymod$slick(float friction) {
+		MixinProbe.LIVING_ENTITY_FRICTION.hit();
 		if (!((Object) this instanceof Player player) || !(player.level() instanceof ServerLevel)) {
 			return friction;
 		}

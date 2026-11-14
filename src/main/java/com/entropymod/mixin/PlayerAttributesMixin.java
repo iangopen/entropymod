@@ -7,6 +7,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Adds this mod's {@link EntropyAttributes#PICKUP_RANGE} to the player's default
@@ -34,6 +35,7 @@ public abstract class PlayerAttributesMixin {
 
 	@Inject(method = "createAttributes", at = @At("RETURN"))
 	private static void entropymod$addPickupRange(CallbackInfoReturnable<AttributeSupplier.Builder> cir) {
+		MixinProbe.PLAYER_ATTRIBUTES.hit();
 		cir.getReturnValue().add(EntropyAttributes.PICKUP_RANGE);
 	}
 }

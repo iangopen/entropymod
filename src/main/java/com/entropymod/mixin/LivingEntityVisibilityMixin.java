@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Makes hostile mobs notice the player from farther away -- part (b) of Heavy
@@ -49,6 +50,7 @@ public abstract class LivingEntityVisibilityMixin {
 
 	@Inject(method = "getVisibilityPercent", at = @At("RETURN"), cancellable = true)
 	private void entropymod$amplifyVisibility(Entity lookingEntity, CallbackInfoReturnable<Double> cir) {
+		MixinProbe.LIVING_ENTITY_VISIBILITY.hit();
 		if (!((Object) this instanceof Player player)) {
 			return;
 		}

@@ -17,6 +17,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Grants Frost Walker without boots or an enchantment.
@@ -51,6 +52,7 @@ public abstract class LivingEntityFrostWalkerMixin {
 
 	@Inject(method = "onChangedBlock", at = @At("TAIL"))
 	private void entropymod$innateFrostWalker(ServerLevel level, BlockPos pos, CallbackInfo ci) {
+		MixinProbe.LIVING_ENTITY_FROST_WALKER.hit();
 		if (!((Object) this instanceof Player player) || !EffectHooks.hasInnateFrostWalker(player)) {
 			return;
 		}

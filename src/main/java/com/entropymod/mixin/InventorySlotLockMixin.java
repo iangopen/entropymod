@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slashed Pockets: refuses manual placement into a locked slot.
@@ -53,6 +54,7 @@ public abstract class InventorySlotLockMixin {
 
 	@Inject(method = "mayPlace", at = @At("RETURN"), cancellable = true)
 	private void entropymod$slashedPockets(ItemStack stack, CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.INVENTORY_SLOT_LOCK.hit();
 		if (!cir.getReturnValue()) {
 			return; // already refused -- never widen permission
 		}

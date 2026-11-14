@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Gives every {@link Animal} an {@code ATTACK_DAMAGE} attribute -- the half of
@@ -61,6 +62,7 @@ public abstract class AnimalAttackDamageMixin {
 	@Inject(method = "createAnimalAttributes", at = @At("RETURN"))
 	private static void entropymod$giveAnimalsAttackDamage(
 			CallbackInfoReturnable<AttributeSupplier.Builder> cir) {
+		MixinProbe.ANIMAL_ATTACK_DAMAGE.hit();
 		// add() mutates the builder and returns it, so there is nothing to
 		// setReturnValue -- the caller already holds this instance.
 		cir.getReturnValue().add(Attributes.ATTACK_DAMAGE, BeastWrathBehavior.ATTACK_DAMAGE);

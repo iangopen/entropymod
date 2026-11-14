@@ -5,6 +5,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Placeholder mixin, kept as a working example. Not needed for the core
@@ -17,6 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class EntropyModMixin {
 	@Inject(at = @At("HEAD"), method = "loadLevel")
 	private void init(CallbackInfo info) {
+		MixinProbe.ENTROPY_MOD.hit();
 		// This code is injected into the start of MinecraftServer.loadLevel()V
 	}
 }

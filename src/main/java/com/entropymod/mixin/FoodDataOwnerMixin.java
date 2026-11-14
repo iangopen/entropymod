@@ -5,6 +5,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.food.FoodData;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Adds an owner reference to {@code FoodData}, so Glutton can tell whose hunger bar
@@ -36,6 +37,7 @@ public abstract class FoodDataOwnerMixin implements FoodDataOwner {
 
 	@Override
 	public void entropymod$setOwner(Player player) {
+		MixinProbe.FOOD_DATA_OWNER.hit();
 		this.entropymod$owner = player;
 	}
 }

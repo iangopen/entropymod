@@ -7,6 +7,7 @@ import net.minecraft.world.entity.LivingEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * The client half of Slick. See {@code LivingEntityFrictionMixin} for the mechanism.
@@ -37,6 +38,7 @@ public abstract class ClientFrictionMixin {
 
 	@ModifyVariable(method = "travelInAir", at = @At("STORE"), index = 3)
 	private float entropymod$slickClient(float friction) {
+		MixinProbe.CLIENT_FRICTION.hit();
 		if (!((Object) this instanceof LocalPlayer player)) {
 			return friction;
 		}

@@ -11,6 +11,7 @@ import net.minecraft.world.phys.BlockHitResult;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Makes the holder's beds explode, for Nightmares.
@@ -52,6 +53,7 @@ public abstract class BedExplosionMixin {
 			at = @At(value = "INVOKE", target = "Lnet/minecraft/world/attribute/BedRule;explodes()Z"))
 	private boolean entropymod$nightmares(BedRule rule, BlockState state, Level level,
 										  BlockPos pos, Player player, BlockHitResult hit) {
+		MixinProbe.BED_EXPLOSION.hit();
 		return rule.explodes() || EffectHooks.bedsExplode(player);
 	}
 }

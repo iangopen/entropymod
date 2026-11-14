@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.ArrayList;
 import java.util.List;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Spills an item on jump for Leaky Pockets.
@@ -30,6 +31,7 @@ public abstract class ServerPlayerJumpMixin {
 
 	@Inject(method = "jumpFromGround", at = @At("TAIL"))
 	private void entropymod$spillItemOnJump(CallbackInfo ci) {
+		MixinProbe.SERVER_PLAYER_JUMP.hit();
 		ServerPlayer player = (ServerPlayer) (Object) this;
 		if (!EffectHooks.rollLeakyPockets(player, player.getRandom())) {
 			return;

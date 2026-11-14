@@ -5,6 +5,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Scales hunger drain for Iron Stomach / Growling Stomach.
@@ -25,6 +26,7 @@ public abstract class PlayerExhaustionMixin {
 
 	@ModifyVariable(method = "causeFoodExhaustion", at = @At("HEAD"), argsOnly = true)
 	private float entropymod$scaleExhaustion(float exhaustion) {
+		MixinProbe.PLAYER_EXHAUSTION.hit();
 		return exhaustion * EffectHooks.exhaustionMultiplier((Player) (Object) this);
 	}
 }

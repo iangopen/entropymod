@@ -11,6 +11,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Randomized Movement Controls and Random Jump. Two effects, one hook, because
@@ -125,6 +126,7 @@ public abstract class KeyboardInputMixin extends ClientInput {
 
 	@Inject(method = "tick", at = @At("RETURN"))
 	private void entropymod$scrambleAndForceJump(CallbackInfo ci) {
+		MixinProbe.KEYBOARD_INPUT.hit();
 		String scramble = ClientRunState.moveScramble();
 		// Ticked every call so the countdown advances regardless of the scramble.
 		boolean forceJump = ClientRunState.tickForcedJump();

@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Butterfingers Extreme: flings the held item out of the player's hand on a landed
@@ -64,6 +65,7 @@ public abstract class PlayerButterfingersMixin {
 							+ "(Lnet/minecraft/world/damagesource/DamageSource;F)Z",
 					shift = At.Shift.AFTER))
 	private void entropymod$butterfingers(Entity target, CallbackInfo ci) {
+		MixinProbe.PLAYER_BUTTERFINGERS.hit();
 		Player player = (Player) (Object) this;
 		if (!EffectHooks.rollButterfingers(player, player.getRandom())) {
 			return;

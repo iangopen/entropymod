@@ -8,6 +8,7 @@ import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Reverses the sprint-hit and Knockback-enchantment bonus, for Lethal Hook.
@@ -60,6 +61,7 @@ public abstract class PlayerExtraKnockbackMixin {
 	private void entropymod$lethalHookExtraKnockback(LivingEntity victim, double strength,
 													double x, double z,
 													Entity target, float knockback, Vec3 preAttackDelta) {
+		MixinProbe.PLAYER_EXTRA_KNOCKBACK.hit();
 		if (EffectHooks.reversesMeleeKnockback((Player) (Object) this)) {
 			victim.knockback(strength, -x, -z);
 			return;

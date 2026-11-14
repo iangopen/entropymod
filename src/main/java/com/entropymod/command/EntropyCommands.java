@@ -5,6 +5,7 @@ import com.entropymod.entropy.EffectDefinition;
 import com.entropymod.entropy.EffectRegistry;
 import com.entropymod.entropy.EntropyManager;
 import com.entropymod.entropy.RunOutcome;
+import com.entropymod.entropy.probe.MixinProbe;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
@@ -15,6 +16,7 @@ import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 
+import java.util.List;
 import java.util.stream.Collectors;
 
 /**
@@ -45,7 +47,51 @@ public final class EntropyCommands {
 			registerStatus(dispatcher);
 			registerForceEnd(dispatcher);
 			registerGrant(dispatcher);
+			registerMixinProbes(dispatcher);
 		});
+	}
+
+	/**
+	 * {@code /entropymixins} -- which mixin handlers have actually RUN this session.
+	 *
+	 * <p>A real readout, not a preview: it prints {@link MixinProbe}'s live state,
+	 * which every handler in both mixin configs writes to as its first statement.
+	 * "The mixin applied" is something the launch log already says; this answers the
+	 * different question of whether the injection point was ever reached, which is
+	 * what a handler on an overridden method silently fails.
+	 *
+	 * <p>A handler listed as not fired is not necessarily broken -- most only run
+	 * when the game does the thing they hook. The list is a to-do for a play-test:
+	 * do the action, run this again, and the row should have moved.
+	 *
+	 * <p>Answers in chat, per the rule {@code /entropyhistory} established: a debug
+	 * command whose output only reaches the log is indistinguishable from a broken
+	 * one.
+	 */
+	private static void registerMixinProbes(CommandDispatcher<CommandSourceStack> dispatcher) {
+		dispatcher.register(Commands.literal("entropymixins")
+				.requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
+				.executes(ctx -> {
+					CommandSourceStack source = ctx.getSource();
+					int total = MixinProbe.values().length;
+					int fired = MixinProbe.firedCount();
+					source.sendSuccess(() -> Component.literal(
+							"[Entropy] mixin handlers fired this session: " + fired + "/" + total), false);
+					for (MixinProbe.Side side : MixinProbe.Side.values()) {
+						List<MixinProbe> pending = MixinProbe.list(side, false);
+						source.sendSuccess(() -> Component.literal(
+								"[Entropy] " + side + " not fired yet (" + pending.size() + "): "
+										+ (pending.isEmpty() ? "(none)" : pending.stream()
+												.map(MixinProbe::label)
+												.collect(Collectors.joining(", ")))), false);
+					}
+					EntropyMod.LOGGER.info("/entropymixins -> {}/{} fired; pending: {}", fired, total,
+							java.util.Arrays.stream(MixinProbe.values())
+									.filter(p -> !p.hasFired())
+									.map(MixinProbe::label)
+									.collect(Collectors.joining(", ")));
+					return fired;
+				}));
 	}
 
 	/**

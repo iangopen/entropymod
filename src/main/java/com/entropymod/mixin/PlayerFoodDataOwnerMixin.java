@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Stamps the owner onto a player's {@code FoodData}, for Glutton.
@@ -32,6 +33,7 @@ public abstract class PlayerFoodDataOwnerMixin {
 
 	@Inject(method = "<init>", at = @At("TAIL"))
 	private void entropymod$stampFoodDataOwner(Level level, GameProfile profile, CallbackInfo ci) {
+		MixinProbe.PLAYER_FOOD_DATA_OWNER.hit();
 		Player player = (Player) (Object) this;
 		FoodData food = player.getFoodData();
 		if (food instanceof FoodDataOwner owner) {

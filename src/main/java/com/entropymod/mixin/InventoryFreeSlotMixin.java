@@ -11,6 +11,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slashed Pockets: keeps automatic pickup out of the locked slots.
@@ -45,6 +46,7 @@ public abstract class InventoryFreeSlotMixin {
 
 	@Inject(method = "getFreeSlot", at = @At("HEAD"), cancellable = true)
 	private void entropymod$skipLockedSlots(CallbackInfoReturnable<Integer> cir) {
+		MixinProbe.INVENTORY_FREE_SLOT.hit();
 		if (!EffectHooks.hasSlashedPockets(this.player)) {
 			return;
 		}

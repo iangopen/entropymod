@@ -9,6 +9,7 @@ import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slippery Grip, bonus 2 of 3: the sprint-jump impulse, server side.
@@ -59,6 +60,7 @@ public abstract class LivingEntitySprintJumpMixin {
 					target = "Lnet/minecraft/world/entity/LivingEntity;addDeltaMovement(Lnet/minecraft/world/phys/Vec3;)V"),
 			index = 0)
 	private Vec3 entropymod$slipperyGripSprintJump(Vec3 impulse) {
+		MixinProbe.LIVING_ENTITY_SPRINT_JUMP.hit();
 		if ((Object) this instanceof Player player
 				&& player.level() instanceof ServerLevel
 				&& EffectHooks.halvesSprintSpeed(player)) {

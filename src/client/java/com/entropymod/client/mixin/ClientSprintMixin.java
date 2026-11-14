@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slippery Grip, client side. The twin of {@code LivingEntitySprintMixin}, and
@@ -43,6 +44,7 @@ public abstract class ClientSprintMixin {
 
 	@Inject(method = "setSprinting", at = @At("TAIL"))
 	private void entropymod$slipperyGripClient(boolean sprinting, CallbackInfo ci) {
+		MixinProbe.CLIENT_SPRINT.hit();
 		if ((Object) this instanceof LocalPlayer player) {
 			SlipperyGripSprint.update(player, ClientRunState.halvesSprintSpeed());
 		}

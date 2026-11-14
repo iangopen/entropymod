@@ -5,6 +5,7 @@ import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyArg;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Behemoth Gauntlets: rewrites the damage of one melee swing.
@@ -35,6 +36,7 @@ public abstract class PlayerAttackDamageMixin {
 							+ "(Lnet/minecraft/world/damagesource/DamageSource;F)Z"),
 			index = 1)
 	private float entropymod$behemothGauntlets(float damage) {
+		MixinProbe.PLAYER_ATTACK_DAMAGE.hit();
 		return EffectHooks.meleeDamage((Player) (Object) this, damage);
 	}
 }

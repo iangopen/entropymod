@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Slippery Grip, bonus 3 of 3: airborne acceleration, server side.
@@ -48,6 +49,7 @@ public abstract class PlayerFlyingSpeedMixin {
 
 	@Inject(method = "getFlyingSpeed", at = @At("RETURN"), cancellable = true)
 	private void entropymod$slipperyGripAirControl(CallbackInfoReturnable<Float> cir) {
+		MixinProbe.PLAYER_FLYING_SPEED.hit();
 		Player player = (Player) (Object) this;
 		if (player.getAbilities().flying
 				|| !player.isSprinting()

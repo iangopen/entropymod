@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Stops animals panicking at a Beast Whisperer -- the first of that effect's two
@@ -40,6 +41,7 @@ public abstract class PanicGoalMixin {
 
 	@Inject(method = "shouldPanic", at = @At("RETURN"), cancellable = true)
 	private void entropymod$calmNearBeastWhisperer(CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.PANIC_GOAL.hit();
 		if (!cir.getReturnValue()) {
 			return;
 		}

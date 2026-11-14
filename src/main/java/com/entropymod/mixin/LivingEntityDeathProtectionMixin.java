@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Phoenix Chambered Heart: rides the Totem of Undying's own escape hatch.
@@ -46,6 +47,7 @@ public abstract class LivingEntityDeathProtectionMixin {
 
 	@Inject(method = "checkTotemDeathProtection", at = @At("HEAD"), cancellable = true)
 	private void entropymod$phoenixHeart(DamageSource source, CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.LIVING_ENTITY_DEATH_PROTECTION.hit();
 		if (!((Object) this instanceof Player player)) {
 			return;
 		}

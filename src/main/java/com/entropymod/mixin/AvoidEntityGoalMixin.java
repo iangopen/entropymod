@@ -8,6 +8,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Stops animals keeping their distance from a Beast Whisperer -- the second of
@@ -38,6 +39,7 @@ public abstract class AvoidEntityGoalMixin {
 
 	@Inject(method = "canUse", at = @At("RETURN"), cancellable = true)
 	private void entropymod$ignoreBeastWhisperer(CallbackInfoReturnable<Boolean> cir) {
+		MixinProbe.AVOID_ENTITY_GOAL.hit();
 		if (cir.getReturnValue() && EffectHooks.suppressesFleeing(this.toAvoid)) {
 			cir.setReturnValue(false);
 		}

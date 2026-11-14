@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.entropymod.entropy.probe.MixinProbe;
 
 /**
  * Makes villagers overcharge for Bad Reputation.
@@ -37,6 +38,7 @@ public abstract class VillagerPricesMixin {
 
 	@Inject(method = "updateSpecialPrices", at = @At("TAIL"))
 	private void entropymod$overcharge(Player player, CallbackInfo ci) {
+		MixinProbe.VILLAGER_PRICES.hit();
 		if (!EffectHooks.hasBadReputation(player)) {
 			return;
 		}
