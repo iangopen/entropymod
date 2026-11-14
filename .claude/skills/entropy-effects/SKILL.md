@@ -6021,3 +6021,79 @@ bare-hand cooldown said `20 → 2.63` where normal is **5.00**; and the Glass Ca
 Pact composition line read `(6.0 + 0.5) × 0.25 = 1.625`, which contradicts **1bb**
 in the same file — the `BASE` term is +50% of the weapon-inclusive total, so an iron
 sword under both is `(1.0 + 5.0) × 1.5 × 0.40 = 3.60`.
+
+---
+
+### The Tier 3/4 batch — 42 effects for entropy 61-100, and no new mixin
+Registry is now **114 effects (56 GOOD / 58 BAD)**. Tier 3 is 61-100, Tier 4 is 81-100 and is *added* to Tier 3
+rather than replacing it, so no window closes before the cap. **Nothing here has been observed in game.**
+
+#### The four shapes, and why none of them is a mixin
+| shape | count | examples |
+|---|---|---|
+| `AttributeEffectBehavior` | 23 | Titan Hide, Executioner, Crushing Gravity, Last Thread |
+| `HookEffectBehavior`, a term on an existing `EffectHooks` multiplier | 6 | Paper Skin, Juggernaut, Starving, Bottomless Stomach, Prodigy, Forgetful |
+| `StatusEffectBehavior` (new) | 12 | Night Eyes, Stoneskin, Marked, Venom |
+| `HookEffectBehavior` + tick service | 1 | Sunburn |
+
+The choice was deliberate. An attribute or a real `MobEffectInstance` cannot apply cleanly and never fire, which is
+this project's most expensive failure mode.
+
+#### Values on a plain player (all asserted against real `AttributeInstance`s)
+| effect | change | result |
+|---|---|---|
+| Titan Hide | `MAX_HEALTH` +20 `ADD_VALUE` | 40 |
+| Adamant Plating | `ARMOR` +10, `ARMOR_TOUGHNESS` +6 | 10 / 6 |
+| Executioner / Apex Predator | `ATTACK_DAMAGE` x2 / x3 (+`ATTACK_SPEED` x1.5) | x6 together |
+| Blur / Stormstride | `MOVEMENT_SPEED` x1.4 / x1.8 | walking 6.04 / 7.77 b/s |
+| Long Arm / Short Arms | reach +3 / -2 block, -1.5 entity | 7.5 and 6.0 / 2.5 and 1.5 |
+| Mountain Goat | `STEP_HEIGHT` +0.65, `SAFE_FALL_DISTANCE` +7 | 1.25 / 10 |
+| Withered Frame / Last Thread | `MAX_HEALTH` x0.5 / x0.1 | 10 / 2; together 1.0 (the floor) |
+| Crushing Gravity | `GRAVITY` x2 | 0.16, apex 0.77 blocks |
+| Grounded | `JUMP_STRENGTH` x0 | cannot jump; `STEP_HEIGHT` untouched |
+| Glass Bones | `FALL_DAMAGE_MULTIPLIER` x3, `SAFE_FALL_DISTANCE` -2 | 2-block drop 3 HP, 8-block 21 HP |
+| Rusted Plating | `ARMOR` -10, `ARMOR_TOUGHNESS` -8 | diamond set 20 -> 10; naked player unchanged |
+| Tinderbox | `BURNING_TIME` x4 | `LivingEntity.igniteForTicks` is `ceil(ticks x BURNING_TIME)` |
+
+**Read player bases from the supplier.** `MOVEMENT_SPEED` is 0.1 for a player (attribute default 0.7) and
+`ATTACK_DAMAGE` is 1.0 (default 2.0). The harness asserts both, per 1bc.
+
+**Molasses' x0.6 is chosen against a threshold, not for size:** walking 2.59 b/s falls under a creeper's 2.75,
+sprinting 3.37 stays over it. That is what keeps it `counterplay = true`.
+
+#### Interactions that are deliberate
+- **Salamander Blood cures Flamboyant and Sunburn.** `LivingEntity.hurtServer` refuses an `#is_fire` source while
+  the entity has Fire Resistance, and that check is below `ServerPlayer.hurtServer`, where Flamboyant amplifies.
+- **A zero on a hook wins.** Bottomless Stomach (x0) overrides Starving (x3); Forgetful (x0) overrides Prodigy.
+- **Bottomless Stomach is narrower than "never hungry".** Natural regeneration spends food through
+  `FoodData.addExhaustion` directly, which `PlayerExhaustionMixin` does not see.
+- **Mountain Goat answers every jump curse**, because none of them touches `STEP_HEIGHT`.
+
+#### `StatusEffectBehavior`: 600 ticks, renewed every 100
+Never `INFINITE_DURATION`: active effects are written to the player's NBT, so an infinite one would be a second
+source of truth beside `AcquiredEffects` and would outlive the mod. The two numbers are constrained (1bt, 1bu in
+CLAUDE.md): the remainder never drops below 500, clear of Night Vision's 200-tick blink and the 20-tick fade; and
+both are multiples of 25 and 50, so Poison I still lands every 25 ticks and Regeneration I every 50 across a
+renewal. `remove` is empty on purpose -- a blanket `removeEffect` would strip a potion's copy too. Milk buys at
+most five seconds.
+
+Vanilla facts verified for the family: Haste is +0.2 mining per level in `Player.getDestroySpeed` and +0.1
+`ATTACK_SPEED` `ADD_MULTIPLIED_TOTAL` per level; Mining Fatigue is x0.3 / x0.09 / x0.0027 by amplifier, which is
+why it was **not** used (level II is a 91% cut and level I duplicates Stone Hands); `BadOmenMobEffect` converts to
+Raid Omen on `isVillage`, not in Peaceful and not for spectators; `InfestedMobEffect.onMobHurt` rolls
+`chanceToSpawn` per hit.
+
+#### Sunburn
+`SunburnBehavior.shouldIgnite` is `Mob.isSunBurnTick` plus `burnUndead`'s helmet test as one Minecraft-free
+function: `MONSTERS_BURN` environment attribute and `isBrightOutside`, `canSeeSky` at the eye, not in water, rain
+or powder snow, nothing in the head slot. Two differences from a zombie, both in the player's favour: no
+brightness roll, and the helmet is not worn down. Exactly 1 of the 32 input rows ignites.
+
+#### Tier 4 and Debt Collector
+`extremeTier(BAD)` is now Last Thread and Venom. Both are `counterplay = false`; the harness check that every such
+effect sat at 40-60 now asserts the invariant behind it (none below 40). Debt Collector, offered at 40-60, can
+therefore deliver either one 40 entropy early.
+
+#### Open
+The Tier 3/4 pools are sized for one entropy per pick. Banked Entropy is taken in essentially every run, so the
+late stretch takes twice the picks and about 36 of them per run are repeat-fallback picks. See CLAUDE.md.

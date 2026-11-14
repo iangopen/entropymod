@@ -13,45 +13,79 @@ cap (default 100).
 
 ---
 
-## Repository state (verified 2026-11-03)
+## Repository state (verified 2026-11-14)
 
-### Branches: the merge is staged, not landed
-- **`merge/lineage-into-main` holds everything.** It is `main` (`a4b5826`) plus a `--no-ff` merge of
-  `run-lifecycle-ended` (`ba1319c`, merge commit `460a615`), then `.gitignore`, `docs/history.md` and README
-  commits. **`main` itself is untouched and still holds the early skeleton** until the owner tests in game and
-  fast-forwards it. The full branch map and the ancestry proof are in `docs/history.md`.
-- **`run-lifecycle-ended` contains every other branch.** All 30 feature branches are ancestors of it. Merging any
-  other tip would drop work.
-- **Code on the merge branch is byte-identical to `ba1319c`.** `git diff ba1319c merge/lineage-into-main -- src
-  build.gradle gradle.properties settings.gradle gradle gradlew gradlew.bat` is empty. Only docs, `.gitignore` and
-  the `entropy-mappings` skill differ.
-- **Build/harness on 2026-11-03: NOT RUN.** Available memory read 1,117 / 937 / 1,241 MB, under the 2,000 MB floor
-  for a Gradle build, so no jar was produced. The last real result is 2026-11-02 on `ba1319c`, the same code:
-  `gradlew build` passed and `gradlew harness` reported 2470 passed, 0 failed. Rebuild before an in-game test.
-- `.gitignore` now also covers `*.class`, `*.log`, `crash-reports/`, `saves/`, `world/` and
-  `.claude/settings.local.json`. `git ls-files` holds no generated output. `gradle/wrapper/gradle-wrapper.jar` is
-  the wrapper and is meant to be tracked.
+### Branches: two things are staged, neither has landed on main
+- **`tier3/entropy-61-100` is the newest work.** It is `merge/lineage-into-main` (`6317c08`) plus the Tier 3/4
+  session: 42 effects for entropy 61-100, a firing probe on every mixin handler, and the harness checks for both.
+  It is pushed. **It has not been played.**
+- **`merge/lineage-into-main` is unchanged** and still holds the 31-branch lineage merged onto `main`
+  (`a4b5826` + merge commit `460a615`). **`main` itself is untouched and still holds the early skeleton** until the
+  owner tests in game and fast-forwards it. The branch map and ancestry proof are in `docs/history.md`.
+- **Merge order is the owner's call.** `tier3/entropy-61-100` contains `merge/lineage-into-main`, so fast-forwarding
+  `main` to the Tier 3 branch lands both; fast-forwarding to the merge branch lands only the lineage.
+- **`run-lifecycle-ended` contains every older branch.** All 30 feature branches are ancestors of it.
+
+### Build and harness, 2026-11-14 (both actually run this session)
+| | Baseline, `merge/lineage-into-main` | `tier3/entropy-61-100` |
+|---|---|---|
+| `gradlew build` | BUILD SUCCESSFUL | BUILD SUCCESSFUL |
+| `gradlew harness` | **2470 passed, 0 failed** | **3527 passed, 0 failed** |
+
+The baseline matches the 2026-11-02 figure, so that number is now re-confirmed rather than inherited. Six existing
+assertions were changed on the Tier 3 branch, all of them pins on the old shape of the registry ("the extreme BAD
+tier is Unstable and Earthquake", "every `counterplay = false` effect sits at 40-60"). Each now asserts the
+invariant it was protecting -- nothing without counterplay below entropy 40 -- and the three Tier 2 members are
+still checked at 40-60 by name.
 
 ### Counts, from source (re-count with these, don't restate from memory)
 | What | Count | Source |
 |---|---|---|
-| Registered effects | **72** (34 GOOD, 38 BAD; Tier 1 at 0-25: 17+17; Tier 2 at 25-60: 17+21) | `register("id", ...)` calls in `EffectRegistry.java` after stripping comments; 72 unique ids, 72 matching `register` lines in `EffectBehaviors.java` |
-| Behavior classes with an `ID` | 73 | `OreSenseBehavior` (`ore_sense`) exists but is not registered (renderer blocked) |
-| Mixin classes | **47** (38 common, 9 client) | `grep -rl '^\s*@Mixin(' src` |
-| Mixin config entries | **47** (38 + 9) | `entropymod.mixins.json` `mixins` + `entropymod.client.mixins.json` `client`; names match the classes 1:1 |
-| ...of which template placeholders | 2 | `EntropyModMixin`, `EntropyModClientMixin`: empty `@Inject` bodies kept as examples. 45 do real work, one of them (`LlamaStrengthAccessor`) an `@Invoker` and one (`FoodDataOwnerMixin`) a duck-interface field |
-| Network payloads | **10** (6 S2C: OpenChoice, HistoryResponse, ClientEffects, TremorLock, RunSync, RunEnd; 4 C2S: ChoiceMade, HistoryRequest, RerollRequest, KeybindSnapshot) | `PayloadTypeRegistry` calls in `EntropyMod.java`; each has a receiver on the other side |
-| Persisted keys | 15 top-level in `EntropyManager.CODEC`, two of them nested (`meta`: 6 keys, `run_end`: 2) | `SavedData` `entropymod:entropy_run` on the overworld |
-| Re-application hooks | 3: `ServerPlayerEvents.JOIN` (relog), `AFTER_RESPAWN` (death), `AFTER_PLAYER_CHANGE_LEVEL` (portal) | `EntropyMod.java`, all calling `reapplyTo` → `reapplyAll` + `CompanionService.gather` + sync |
+| Registered effects | **114** (56 GOOD, 58 BAD). Tier 1 at 0-25: 17+17. Tier 2 at 25-60: 17+21. **Tier 3 at 61-100: 19+18. Tier 4 at 81-100: 3+2** | `register("id", ...)` calls in `EffectRegistry.java`; 114 matching `register` lines in `EffectBehaviors.java` |
+| Behavior classes with an `ID` | 115 | `OreSenseBehavior` (`ore_sense`) exists but is not registered (renderer blocked) |
+| ...of the 42 new ones, by shape | 23 attribute, 7 hook (6 multiplier terms + Sunburn), 12 status effect, **0 mixin** | `Tier3Checks` asserts each is one of the known shapes |
+| Mixin classes | **47** (38 common, 9 client) -- unchanged, Tier 3 added none | `grep -rl '^\s*@Mixin(' src` |
+| Mixin config entries | **47** (38 + 9) | the two mixin configs; names match the classes 1:1 |
+| Mixin firing probes | **49** points on 46 classes | `MixinProbe`; three classes carry two handlers. `LlamaStrengthAccessor` (an `@Invoker`, no body) is the one without |
+| Network payloads | **10** (6 S2C, 4 C2S) -- unchanged | `PayloadTypeRegistry` calls in `EntropyMod.java` |
+| Persisted keys | 15 top-level in `EntropyManager.CODEC` -- unchanged; Tier 3 added no run state | `SavedData` `entropymod:entropy_run` |
+| Per-tick effect services | **10**: the eight from before plus `StatusEffectService` and `SunburnService` | the `END_SERVER_TICK` block in `EntropyMod.java` |
+| Re-application hooks | 3 -- unchanged | `EntropyMod.java` |
 
-### In-game evidence, per effect (there is no per-effect ledger)
-Neither this file nor the skills keep a "seen working in game" list. The `entropy-effects` skill does record
-**in-game reports** for these effects: Heavy Footsteps, Magnetic Boots, Second Guess, Slippery Grip, Double Jump,
-Unstable, Creeper Magnet, The Entourage, The Audience, Earthquake. Each was a bug found in play and then fixed. The
-fixes are harness-checked, but the record doesn't say whether each fix was re-observed in game. The other 62 effects
-have no recorded in-game observation: build plus the harness only (the harness references 56 of the 72 by id or
-class). **Known content gap:** no effect is eligible above entropy 60, so `triggerPick` returns
-`NO_ELIGIBLE_EFFECTS` and the run stalls at 61. With the default cap of 100 the cap-loss can't be reached in play.
+### What is verified, and what is waiting on the play-test
+**Verified headlessly, on this branch:**
+- **The stall at 61 is gone.** `Tier3Checks.walkEveryLevel` walks entropy 0 to 99 and asserts both phases have a
+  non-empty pool and a non-empty roll at every level (200 checks), and asserts that with the 42 new effects taken
+  back out the pool is empty from 61 to 99 -- the regression, driven rather than described.
+- **Whole runs reach the cap.** 800 simulated runs through the real `EffectRegistry.roll` and `AcquiredEffects`,
+  none stalls. `triggerPick` itself is not called: its last line sends a packet.
+- Every new attribute effect's value on a real player-based `AttributeInstance`, idempotency, removal, and the
+  stacks that could land on a dangerous clamp. The status family's refresh cadence against vanilla's own
+  `shouldApplyEffectTickThisTick`. Sunburn's 32-row decision table. All 42 through the real persistence codec.
+
+**NOT verified -- needs a real game session:**
+- **None of the 42 new effects has been observed in game.** Build plus harness only.
+- **No mixin handler has been observed to fire.** The probes are wired and the harness proves each handler *reports*
+  when it runs; it cannot prove one runs, because the harness does not run the Mixin transformer. `/entropymixins`
+  and the `[mixin-probe] FIRED` log lines are the evidence, and they exist only after a `runClient`.
+- The older in-game record is unchanged: the `entropy-effects` skill records in-game reports for Heavy Footsteps,
+  Magnetic Boots, Second Guess, Slippery Grip, Double Jump, Unstable, Creeper Magnet, The Entourage, The Audience
+  and Earthquake, each a bug found in play and then fixed. The other 62 pre-existing effects have no recorded
+  in-game observation.
+
+**Three things this session found that are real and still open:**
+- **Banked Entropy is taken in essentially every run** (400 of 400 simulated). The GOOD pool at entropy 51-60 is
+  exactly Glass Cannon Pact and Banked Entropy, and a run makes about five GOOD picks there. This is pre-existing
+  and was not changed (rebalancing existing effects was out of scope).
+- **So the 61-100 stretch takes about twice the picks, and the Tier 3/4 pools drain.** A real run makes 146-154
+  picks to reach 100, and an average of **36 picks from 61 up are repeat-fallback picks** -- cards the player
+  already holds. Never a stall. With Banked Entropy never offered the same runs take exactly 100 picks and hit the
+  fallback zero times, so the content is sized for one entropy per pick and not for half. Fixes, none taken: move
+  Banked Entropy's window, add roughly 20 more effects per phase, or change the repeat-fallback policy (Open
+  Question 6).
+- **Debt Collector now delivers a Tier 4 curse.** `extremeTier(BAD)` is derived, so it moved from Unstable and
+  Earthquake to Last Thread and Venom exactly as its javadoc said it would. Debt Collector is offered at 40-60, so
+  it can hand over a one-heart or permanent-poison curse 40 entropy early. It was already `counterplay = false`.
 
 ### History rewrite and restore
 - **History rewritten 2026-11-02.** Committed `build/`, `run/`, `.gradle/`, `.idea/` and `logs/` were
@@ -99,6 +133,17 @@ are no longer stubs** — all 20 Tier 1 effects change real game state.
 Most new effects should extend `AttributeEffectBehavior` and be ~10 lines. If a
 new effect makes you edit a fourth file, that's a signal the abstraction is
 missing something; fix the abstraction rather than the caller.
+
+**There are four behavior shapes, and a new effect should be one of them:**
+`AttributeEffectBehavior` (a modifier), `HookEffectBehavior` (membership in the
+acquired set is the effect; a mixin or a service reads it), **`StatusEffectBehavior`**
+(a real vanilla `MobEffectInstance`, granted for 600 ticks and renewed every 100 by
+`StatusEffectService` -- never infinite, because active effects live in the player's
+NBT and an infinite one would be a second source of truth beside `AcquiredEffects`),
+or a direct `EffectBehavior` for the few with one-shot world state. `StatusEffectService`
+finds its effects by type, so a new status effect is still exactly the three steps.
+A hook effect that only adds a term to an existing `EffectHooks` multiplier does
+edit `EffectHooks` -- that is the hook's own door, not a fourth file.
 
 **Two optional hooks on `EffectBehavior` exist for effects whose content is a
 change to the PICK LOOP rather than to the player.** Both default to doing
@@ -300,6 +345,63 @@ Corollary for future effects: **an effect is not done when the mixin applies.**
 It is done when a value has been observed to change in game. Prefer effects whose
 result is directly measurable, and when a magnitude is chosen, sanity-check what
 it means in blocks/hearts/seconds before shipping it.
+
+### Mixin firing probes — "applied", "reached" and "changed" are three claims
+Every handler in both mixin configs calls `MixinProbe.<NAME>.hit()` as its **first
+statement**, before any gate. The first call logs `[mixin-probe] FIRED Class#handler`
+at INFO; after that it is one volatile read. `/entropymixins` prints which handlers
+have run this session and which have not.
+
+This sits between the two claims the section above separates. A handler on a method
+a subclass overrides without calling super *applies* and is never *reached* (failure
+mode 1); the launch log cannot tell you that and the probe can. It does **not** prove
+the behaviour changed -- a value can still be re-clamped downstream (failure mode 2).
+
+- **A "not fired" row is a to-do, not a failure.** Most handlers only run when the
+  game does the thing they hook. Do the action, run the command again.
+- **State is per JVM.** In singleplayer the client handlers show up in the server
+  command; on a dedicated server the nine `CLIENT` rows can never fire.
+- **The harness checks the wiring, not the firing.** It decodes every common
+  handler's bytecode and asserts it opens with `getstatic MixinProbe.X` /
+  `invokevirtual hit`, and checks the client ones by source text (labelled). It does
+  not run the Mixin transformer and says so in its own output.
+- **A new mixin handler needs a new `MixinProbe` constant.** The harness fails if a
+  config entry has no probe, so this cannot be forgotten quietly.
+- `MixinProbe` lives in `com.entropymod.entropy.probe`, **not** in a mixin package:
+  Mixin refuses to let ordinary code load a class from a package a config declares.
+
+### Tier 3 and 4 — what the 61-100 band is made of, and three findings
+*(Per-effect derivations are in the `entropy-effects` skill, "The Tier 3/4 batch".)*
+
+42 effects, **no new mixin**. Every one is an attribute, a term on an existing
+`EffectHooks` multiplier, a refreshed vanilla status effect, or (Sunburn) a tick
+service. That was a deliberate choice against this project's known failure mode:
+an attribute or a real `MobEffectInstance` cannot "apply and never fire".
+
+**1bt. A refreshed status effect must be renewed on a multiple of the effect's own
+period.** Vanilla fires periodic effects on `duration % interval == 0` (Poison I 25,
+Regeneration I 50). Resetting the duration to 600 every 100 ticks keeps the cadence
+exact because both numbers are multiples of both periods; a 90-tick refresh would
+make Poison's damage rate drift. Driven against vanilla's own
+`shouldApplyEffectTickThisTick`, not restated.
+
+**1bu. Rendering reads REMAINING duration, so "permanent" needs a floor, not just a
+refresh.** Night Vision blinks under 200 remaining ticks (`GameRenderer
+.getNightVisionScale`, `endsWithin(200)`) and Darkness/Blindness fade over their last
+20 (1aa). 600/100 holds the remainder at 500 or more. Same family as 1ah.
+
+**1bv. A counterfactual that marks an id "already taken" is defeated by the repeat
+fallback.** When a pool is exhausted, `roll` re-offers the whole eligible pool,
+taken ids included. A harness model that wants "this effect is never offered" must
+filter the *cards*, not only the taken set -- the first draft of the no-Banked-Entropy
+run leaked exactly this way at entropy 51-60 and reported the wrong thing.
+
+**Every new multiplied attribute change is `ADD_MULTIPLIED_TOTAL`**, for the reason
+Embrace the Moon established: a product cannot reach zero, and three of these
+attributes have a dangerous floor (`ATTACK_SPEED` 0 is unrecoverable, `ATTACK_DAMAGE`
+0, `GRAVITY` below 0). The two deliberate zeros are Grounded (`JUMP_STRENGTH` x0 --
+cannot jump, `STEP_HEIGHT` untouched) and Stormstride (`FALL_DAMAGE_MULTIPLIER` x0 --
+immunity), and both are the attribute's harmless side.
 
 ### Two findings from the survival-batch revision that generalise
 *(Derivations, tables and javap evidence are in the `entropy-effects` skill, under
@@ -536,10 +638,10 @@ goes through.
 #### ENDED stops the LOOP, and deliberately nothing else
 This was recorded as "likely required, not yet decided" for every per-tick
 system. **Decided: the entropy loop only.** `EntropyManager.tick` is the sole
-per-tick system that consults the run state. The eight effect services —
+per-tick system that consults the run state. The ten effect services —
 `GreenThumbGrowth`, `BlightTouchedTrample`, `SlashedPocketsSweep`,
 `DangerSenseGlow`, `UnstableSpawner`, `CreeperMagnetSpawner`, `CompanionService`,
-`EarthquakeService` — do **not**, and the harness asserts that absence per
+`EarthquakeService`, `StatusEffectService`, `SunburnService` — do **not**, and the harness asserts that absence per
 service so a later session has to meet the argument rather than quietly flip it.
 
 **Every one of them *could* gate cleanly** — each already calls
@@ -653,6 +755,7 @@ test command.
 | `/entropyhistory` | client → server | **YES** — real request/response, prints to chat |
 | `/entropyforcewin` | server | **YES** — the real `endRun` |
 | `/entropyforceloss` | server | **YES** — the real `endRun` |
+| `/entropymixins` | server | **YES** — reads live `MixinProbe` state |
 | `/entropypreview` | client only | **NO** — hardcoded fake data |
 
 #### `/entropygrant` is the standard way to test a specific effect
@@ -842,7 +945,12 @@ to edit code and rebuild. See Open Question 5.
   `com.entropymod.entropy.behavior`), never a central switch. New effect =
   new file + two registration lines, zero edits to existing code.
 - **All effects are permanent.** No durations, no expiry. `EffectDefinition` has
-  no duration field and must not regrow one as a magic int.
+  no duration field and must not regrow one as a magic int. (A `StatusEffectBehavior`
+  grant has a duration; the *effect* does not -- it is renewed for as long as the id
+  is in `AcquiredEffects`.)
+- **Both phases must be selectable at every entropy from 0 to the cap.** Phase
+  alternates on pick count, not entropy, and Banked Entropy decouples the two, so
+  a level with only one phase available can stall. The harness walks it.
 - **`EffectBehavior.apply` must be idempotent** — it runs again on every
   respawn, rejoin, and dimension change.
 - **No-repeat: an effect picked once never appears again that run.** Distinct

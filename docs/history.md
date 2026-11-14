@@ -58,6 +58,25 @@ Embrace the Moon and Giant Size work is the commit before it, `3939b76`.
 Since every branch is an ancestor of `run-lifecycle-ended`, deleting the 30 feature branches after the merge
 reaches `main` would lose nothing. That hasn't been done; it's the owner's call.
 
+## 2026-11-14: Tier 3 and 4 (entropy 61-100), and a firing probe on every mixin
+- Baseline first, on `merge/lineage-into-main` (`6317c08`): `gradlew build` passed and `gradlew harness` reported
+  2470 passed, 0 failed. Branched `tier3/entropy-61-100` from it. `main` and the merge branch were not touched.
+- Added 42 effects: Tier 3 at 61-100 (19 GOOD, 18 BAD) and Tier 4 at 81-100 (3 GOOD, 2 BAD). Registry 72 -> 114.
+  None needed a new mixin: 23 are attributes, 6 are terms on existing `EffectHooks` multipliers, 12 are vanilla
+  status effects renewed by a new `StatusEffectService`, and Sunburn is a tick service. Every vanilla symbol was
+  checked with `javap` against `minecraft-common-deobf-26.1.2.jar` before use (attribute and effect names,
+  `Mob.isSunBurnTick`/`burnUndead`, `PoisonMobEffect`, `InfestedMobEffect`, `BadOmenMobEffect`,
+  `LivingEntity.igniteForTicks`, `GameRenderer.getNightVisionScale`).
+- Added `MixinProbe`: every handler in both mixin configs calls `hit()` first, 49 points on 46 classes, and
+  `/entropymixins` prints which have run. Inserted by script, then reviewed.
+- Harness: new `Tier3Checks` (the 0-to-cap walk, 800 simulated runs, attribute values and stacking, status cadence,
+  Sunburn, persistence, probe wiring). Six existing assertions that pinned the old extreme tier and the 40-60
+  window were rewritten to the invariant they protected. Final: 3527 passed, 0 failed; `gradlew build` passed.
+- Two harness failures were diagnosed rather than patched over. The whole-run check assumed some runs skip Banked
+  Entropy; none does, because the GOOD pool at 51-60 is two effects. The counterfactual written to measure that
+  then leaked, because the repeat fallback re-offers taken ids. Both are recorded in CLAUDE.md (1bv and the open
+  items).
+- Not done: no in-game session. Nothing here has been observed in play, and no probe has been seen to fire.
 ## 2026-11-03: lineage merged onto a branch, not yet onto main
 - Mapped the lineage (above). Created `merge/lineage-into-main` from `main` (`a4b5826`) and merged
   `origin/run-lifecycle-ended` with `--no-ff` (merge commit `460a615`). The only conflict was CLAUDE.md: kept the

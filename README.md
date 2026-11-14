@@ -22,9 +22,11 @@ server restart.
 
 | | Count | Where it's counted from |
 |---|---|---|
-| Effects (Blessings + Curses) | **72**: 34 Blessings, 38 Curses | `register(...)` calls in `EffectRegistry.java`, each matched to one behavior class in `EffectBehaviors.java` |
+| Effects (Blessings + Curses) | **114**: 56 Blessings, 58 Curses | `register(...)` calls in `EffectRegistry.java`, each matched to one behavior class in `EffectBehaviors.java` |
 | Tier 1 (Entropy 0–25) | 34: 17 Blessings, 17 Curses | `minEntropy`/`maxEntropy` in `EffectRegistry.java` |
 | Tier 2 (Entropy 25–60) | 38: 17 Blessings, 21 Curses | same |
+| Tier 3 (Entropy 61–100) | 37: 19 Blessings, 18 Curses | same |
+| Tier 4 (Entropy 81–100) | 5: 3 Blessings, 2 Curses | same |
 | Mixins | **47** classes, 38 common + 9 client-only, each listed once in the two mixin configs | `@Mixin` classes vs `entropymod.mixins.json` + `entropymod.client.mixins.json` |
 | Network payloads | **10**: 6 server→client, 4 client→server | `PayloadTypeRegistry` calls in `EntropyMod.java` |
 
@@ -108,16 +110,19 @@ data, for checking layout only.
 
 ## Status
 
-**Built and working in code:** the interval loop and phase alternation; 72 permanent effects across Tiers 1 and 2;
+**Built and working in code:** the interval loop and phase alternation; 114 permanent effects across Tiers 1 to 4, selectable at every Entropy from 0 to the cap;
 persistence across restart; re-application on death, relog and dimension change; no-repeat and anti-stacking; the
 start gate, both end conditions, the death counter and the end screen; the responsive choice screen; the Entropy HUD;
 the debug commands; the headless harness.
 
 **Not built yet:**
 
-- **Tiers 3 and 4.** No effect is eligible above Entropy 60. Past 60 the loop offers nothing and Entropy stops
-  rising, so with the default cap of 100 the cap-loss can't be reached in normal play yet (`/entropyforceloss`
-  tests that path). Above Entropy 50 the Blessing pool is down to one effect.
+- **In-game verification of Tiers 3 and 4.** The 42 effects for Entropy 61–100 are built and pass the headless
+  harness, which walks Entropy 0 to the cap and checks both phases are selectable at every level. None has been
+  observed in game yet. `/entropymixins` lists which mixin handlers have actually run this session.
+- **Enough late content to avoid repeats.** Between Entropy 51 and 60 the Blessing pool is two effects, one of
+  them Banked Entropy, so nearly every run takes it and the stretch from 61 to 100 takes about twice the picks.
+  The run still reaches the cap, but about a third of those late picks re-offer effects already held.
 - **The "signature" effects** from the design doc (Mirror World, Fisheye, Doppelganger and others). Ore Sense
   has a detection layer but no renderer, and isn't registered.
 - **A config surface.** Interval and cap can be changed in code but not from the game. There's no world-creation
