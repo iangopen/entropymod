@@ -166,7 +166,7 @@ final class Checks {
 	}
 
 	/** The Code attribute's instruction array for a named method. */
-	private static byte[] codeOf(Class<?> owner, String methodName) {
+	static byte[] codeOf(Class<?> owner, String methodName) {
 		java.io.DataInputStream in = new java.io.DataInputStream(
 				new java.io.ByteArrayInputStream(classBytes(owner)));
 		try {

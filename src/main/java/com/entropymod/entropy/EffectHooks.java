@@ -2,6 +2,12 @@ package com.entropymod.entropy;
 
 import com.entropymod.EntropyMod;
 import com.entropymod.entropy.behavior.BadReputationBehavior;
+import com.entropymod.entropy.behavior.BottomlessStomachBehavior;
+import com.entropymod.entropy.behavior.ForgetfulBehavior;
+import com.entropymod.entropy.behavior.JuggernautBehavior;
+import com.entropymod.entropy.behavior.PaperSkinBehavior;
+import com.entropymod.entropy.behavior.ProdigyBehavior;
+import com.entropymod.entropy.behavior.StarvingBehavior;
 import com.entropymod.entropy.behavior.BehemothGauntletsBehavior;
 import com.entropymod.entropy.behavior.ButterfingersExtremeBehavior;
 import com.entropymod.entropy.behavior.BeastWhispererBehavior;
@@ -94,6 +100,15 @@ public final class EffectHooks {
 		if (acquired.contains(GrowlingStomachBehavior.ID)) {
 			multiplier *= GrowlingStomachBehavior.MULTIPLIER;
 		}
+		// Tier 3. Same door, same product: Starving triples the cost and Bottomless
+		// Stomach multiplies it by zero, so holding both is zero -- the blessing wins,
+		// and that falls out of the arithmetic rather than out of a priority rule.
+		if (acquired.contains(StarvingBehavior.ID)) {
+			multiplier *= StarvingBehavior.MULTIPLIER;
+		}
+		if (acquired.contains(BottomlessStomachBehavior.ID)) {
+			multiplier *= BottomlessStomachBehavior.MULTIPLIER;
+		}
 		return multiplier;
 	}
 
@@ -116,6 +131,14 @@ public final class EffectHooks {
 		if (acquired.contains(GiantSizeBehavior.ID)) {
 			multiplier *= GiantSizeBehavior.DAMAGE_MULTIPLIER;
 		}
+		// Tier 3/4, on the same hook for the same reason. Every factor is positive,
+		// so the product can never reach zero whatever a run has stacked.
+		if (acquired.contains(PaperSkinBehavior.ID)) {
+			multiplier *= PaperSkinBehavior.MULTIPLIER;
+		}
+		if (acquired.contains(JuggernautBehavior.ID)) {
+			multiplier *= JuggernautBehavior.MULTIPLIER;
+		}
 		return multiplier;
 	}
 
@@ -131,6 +154,13 @@ public final class EffectHooks {
 		}
 		if (acquired.contains(SlowLearnerBehavior.ID)) {
 			multiplier *= SlowLearnerBehavior.MULTIPLIER;
+		}
+		// Tier 3. Forgetful is a zero, so it overrides Prodigy when both are held.
+		if (acquired.contains(ProdigyBehavior.ID)) {
+			multiplier *= ProdigyBehavior.MULTIPLIER;
+		}
+		if (acquired.contains(ForgetfulBehavior.ID)) {
+			multiplier *= ForgetfulBehavior.MULTIPLIER;
 		}
 		return multiplier;
 	}

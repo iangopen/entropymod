@@ -12,11 +12,11 @@ import java.util.stream.Collectors;
  * need to be added -- the timer, GUI, and networking code never change when you
  * add effect #47.
  *
- * <p><b>Current content: 72 effects — 34 GOOD and 38 BAD, all permanent.</b>
- * Tier 1 is 34 (17 GOOD / 17 BAD) at entropy 0-25; the rest are Tier 2 at
- * entropy 25-50, plus Glass Cannon Pact, Unstable and Earthquake at 40-60. It is
- * a baseline, not the finished game: Tiers 3-4 and the odd/signature effects
- * still slot in the same way.
+ * <p><b>Current content: 114 effects — 56 GOOD and 58 BAD, all permanent.</b>
+ * Tier 1 is 34 (17 GOOD / 17 BAD) at entropy 0-25; Tier 2 is 38 at 25-60;
+ * Tier 3 is 37 (19 GOOD / 18 BAD) at 61-100 and Tier 4 is 5 (3 GOOD / 2 BAD)
+ * at 81-100. Both phases are selectable at every entropy from 0 to the cap,
+ * which the harness asserts by walking it.
  *
  * <p>Every effect is permanent — see {@link EffectDefinition} for why there is
  * no duration field.
@@ -345,8 +345,169 @@ public final class EffectRegistry {
 				"Rerolling is forbidden for the rest of the run -- banked charges included",
 				EffectCategory.META, EffectPhase.BAD, 25, 55, true);
 
-		// TODO: Tiers 3-4 + odd/signature effects go here, same pattern.
-		// See entropy-modpack-effects.md for the full list to port over.
+		// =================================================================
+		// TIER 3 (entropy 61-100) and TIER 4 (entropy 81-100) -- 42 effects
+		//
+		// Before this block nothing was eligible above entropy 60, so triggerPick
+		// returned NO_ELIGIBLE_EFFECTS and a run stalled at 61 with the default cap
+		// of 100 unreachable. The harness now walks entropy 0 -> cap and asserts
+		// both phases are selectable at every level.
+		//
+		// Two bands rather than one, and both run to 100:
+		//   - Tier 3 opens at 61 and stays eligible to the cap, so the pool only
+		//     ever narrows through no-repeat, never through a window closing.
+		//   - Tier 4 opens at 81 and is the capstones. It is also what
+		//     extremeTier(BAD) now resolves to -- Last Thread and Venom -- so
+		//     Debt Collector's "worst the run has to offer" moved with it, exactly
+		//     as that method's javadoc says it would.
+		//
+		// A default run makes about ten picks of each phase in each band. The GOOD
+		// pool is 19 then 12; the BAD pool is 18 then 10, so without Banked Entropy
+		// the repeat fallback is not reached until the very last curse, if at all.
+		//
+		// No effect here needed a new mixin. Each is an attribute, a term on an
+		// existing EffectHooks multiplier, a refreshed vanilla status effect
+		// (StatusEffectBehavior), or -- Sunburn only -- a tick service.
+		//
+		// Every Tier 3 curse is counterplay = true and its behavior class says what
+		// the answer is. The two Tier 4 curses are counterplay = false and say why.
+		// =================================================================
+		// --- GOOD, entropy 61-100: 19 generated here ---
+		register("titan_hide", "Titan Hide",
+				"+10 hearts of maximum health",
+				EffectCategory.SURVIVAL, EffectPhase.GOOD, 61, 100, true);
+		register("adamant_plating", "Adamant Plating",
+				"+10 armor and +6 armor toughness, with nothing worn",
+				EffectCategory.GEAR, EffectPhase.GOOD, 61, 100, true);
+		register("executioner", "Executioner",
+				"+100% attack damage",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 61, 100, true);
+		register("blur", "Blur",
+				"+40% movement speed",
+				EffectCategory.MOVEMENT, EffectPhase.GOOD, 61, 100, true);
+		register("quarry_hands", "Quarry Hands",
+				"+100% mining speed",
+				EffectCategory.TOOL, EffectPhase.GOOD, 61, 100, true);
+		register("long_arm", "Long Arm",
+				"+3 blocks of reach for mining, placing and attacking",
+				EffectCategory.UTILITY, EffectPhase.GOOD, 61, 100, true);
+		register("unshakeable", "Unshakeable",
+				"Nothing can knock you back -- not mobs, not explosions",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 61, 100, true);
+		register("mountain_goat", "Mountain Goat",
+				"Walk straight up full blocks, and fall 10 blocks unharmed",
+				EffectCategory.MOVEMENT, EffectPhase.GOOD, 61, 100, true);
+		register("whirlwind", "Whirlwind",
+				"+100% attack speed",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 61, 100, true);
+		register("bottomless_stomach", "Bottomless Stomach",
+				"Sprinting, jumping, mining and fighting no longer cost hunger",
+				EffectCategory.SURVIVAL, EffectPhase.GOOD, 61, 100, true);
+		register("prodigy", "Prodigy",
+				"Triple experience from every source",
+				EffectCategory.META, EffectPhase.GOOD, 61, 100, true);
+		register("night_eyes", "Night Eyes",
+				"Permanent Night Vision",
+				EffectCategory.UTILITY, EffectPhase.GOOD, 61, 100, true);
+		register("salamander_blood", "Salamander Blood",
+				"Permanent Fire Resistance -- fire and lava cannot hurt you",
+				EffectCategory.SURVIVAL, EffectPhase.GOOD, 61, 100, true);
+		register("gills", "Gills",
+				"Permanent Water Breathing",
+				EffectCategory.UTILITY, EffectPhase.GOOD, 61, 100, true);
+		register("stoneskin", "Stoneskin",
+				"Permanent Resistance II -- 40% less damage from almost everything",
+				EffectCategory.GEAR, EffectPhase.GOOD, 61, 100, true);
+		register("second_wind", "Second Wind",
+				"Permanent Regeneration -- a heart every five seconds",
+				EffectCategory.SURVIVAL, EffectPhase.GOOD, 61, 100, true);
+		register("overclocked", "Overclocked",
+				"Permanent Haste II",
+				EffectCategory.TOOL, EffectPhase.GOOD, 61, 100, true);
+		register("village_hero", "Village Hero",
+				"Permanent Hero of the Village -- villagers discount and gift you",
+				EffectCategory.UTILITY, EffectPhase.GOOD, 61, 100, true);
+		register("featherfall", "Featherfall",
+				"Permanent Slow Falling -- you drift down and never take fall damage",
+				EffectCategory.MOVEMENT, EffectPhase.GOOD, 61, 100, true);
+
+		// --- GOOD, entropy 81-100: 3 generated here ---
+		register("apex_predator", "Apex Predator",
+				"+200% attack damage and +50% attack speed",
+				EffectCategory.COMBAT, EffectPhase.GOOD, 81, 100, true);
+		register("stormstride", "Stormstride",
+				"+80% movement speed, and you never take fall damage",
+				EffectCategory.MOVEMENT, EffectPhase.GOOD, 81, 100, true);
+		register("juggernaut", "Juggernaut",
+				"All damage taken reduced by 60%",
+				EffectCategory.GEAR, EffectPhase.GOOD, 81, 100, true);
+
+		// --- BAD, entropy 61-100: 17 generated here ---
+		register("withered_frame", "Withered Frame",
+				"Your maximum health is halved",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 61, 100, true);
+		register("feeble", "Feeble",
+				"-60% attack damage",
+				EffectCategory.COMBAT, EffectPhase.BAD, 61, 100, true);
+		register("molasses", "Molasses",
+				"-40% movement speed",
+				EffectCategory.MOVEMENT, EffectPhase.BAD, 61, 100, true);
+		register("stone_hands", "Stone Hands",
+				"-60% mining speed",
+				EffectCategory.TOOL, EffectPhase.BAD, 61, 100, true);
+		register("short_arms", "Short Arms",
+				"Your reach is cut to 2.5 blocks, and 1.5 for anything alive",
+				EffectCategory.UTILITY, EffectPhase.BAD, 61, 100, true);
+		register("crushing_gravity", "Crushing Gravity",
+				"Gravity is doubled -- you cannot jump a full block, and you fall twice as fast",
+				EffectCategory.MOVEMENT, EffectPhase.BAD, 61, 100, true);
+		register("glass_bones", "Glass Bones",
+				"Fall damage is tripled, and a two-block drop already hurts",
+				EffectCategory.MOVEMENT, EffectPhase.BAD, 61, 100, true);
+		register("rusted_plating", "Rusted Plating",
+				"Your armor counts for 10 points less, and loses 8 toughness",
+				EffectCategory.GEAR, EffectPhase.BAD, 61, 100, true);
+		register("leaden_swing", "Leaden Swing",
+				"-50% attack speed",
+				EffectCategory.COMBAT, EffectPhase.BAD, 61, 100, true);
+		register("tinderbox", "Tinderbox",
+				"Once alight, you burn four times as long",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 61, 100, true);
+		register("grounded", "Grounded",
+				"You can no longer jump",
+				EffectCategory.MOVEMENT, EffectPhase.BAD, 61, 100, true);
+		register("paper_skin", "Paper Skin",
+				"All damage taken is doubled",
+				EffectCategory.GEAR, EffectPhase.BAD, 61, 100, true);
+		register("starving", "Starving",
+				"Everything you do costs three times the hunger",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 61, 100, true);
+		register("forgetful", "Forgetful",
+				"You no longer gain experience",
+				EffectCategory.META, EffectPhase.BAD, 61, 100, true);
+		register("shadow_blind", "Shadow Blind",
+				"Permanent Darkness -- the world pulses black around you",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 61, 100, true);
+		register("marked", "Marked",
+				"Permanent Bad Omen -- every village you enter is raided",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 61, 100, true);
+		register("infested", "Infested",
+				"Permanently Infested -- being hurt can burst silverfish out of you",
+				EffectCategory.DEBUFF, EffectPhase.BAD, 61, 100, true);
+
+		// --- BAD, entropy 81-100: 2 generated here ---
+		register("last_thread", "Last Thread",
+				"Your maximum health is cut to a tenth -- one heart",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 81, 100, false);
+		register("venom", "Venom",
+				"Permanently poisoned -- it cannot kill you, and it never lets you heal",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 81, 100, false);
+
+		// Sunburn is the one effect in this block with a service of its own.
+		register("sunburn", "Sunburn",
+				"Daylight sets you on fire, like the undead -- unless you wear a helmet",
+				EffectCategory.SURVIVAL, EffectPhase.BAD, 61, 100, true);
+		// Odd/signature effects still slot in here, same pattern.
 	}
 
 	private static void register(String id, String displayName, String description,

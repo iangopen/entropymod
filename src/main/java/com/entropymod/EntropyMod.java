@@ -18,6 +18,8 @@ import com.entropymod.network.ChoiceMadePayload;
 import com.entropymod.network.ClientEffectsPayload;
 import com.entropymod.network.TremorLockPayload;
 import com.entropymod.network.HistoryRequestPayload;
+import com.entropymod.entropy.status.StatusEffectService;
+import com.entropymod.entropy.status.SunburnService;
 import com.entropymod.network.HistoryResponsePayload;
 import com.entropymod.network.KeybindSnapshotPayload;
 import com.entropymod.network.OpenChoicePayload;
@@ -217,6 +219,12 @@ public class EntropyMod implements ModInitializer {
 			// effects -- but it spawns nothing, so no SafeSpawn. Returns on a single
 			// hash lookup for a run that does not hold it.
 			EarthquakeService.tick(server);
+			// Tier 3. The status family is renewed rather than granted once with an
+			// infinite duration -- see StatusEffectBehavior -- and Sunburn is a
+			// periodic question about where the player is standing. Both return on
+			// the first check for a run that holds neither.
+			StatusEffectService.tick(server);
+			SunburnService.tick(server);
 		});
 
 		// Both services' state is transient, not part of the run, so neither is

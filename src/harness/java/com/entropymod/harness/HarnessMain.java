@@ -203,6 +203,7 @@ public final class HarnessMain {
 		endScreenReadsRealData();
 		deathCounter();
 		runEndPayloadRoundTrip();
+		Tier3Checks.run();
 		System.exit(Checks.summary());
 	}
 
@@ -698,10 +699,16 @@ public final class HarnessMain {
 			check(!extreme.counterplay(),
 					"the extreme tier member '" + extreme.id() + "' is counterplay = false");
 		}
+		// This used to pin the window itself ("sits at 40-60"). Tier 4 added two
+		// more no-counterplay curses at 81-100, so what is pinned now is the
+		// invariant that window was chosen to satisfy: CLAUDE.md Part 2 forbids such
+		// an effect BELOW 40. The Tier 2 members are still checked at 40-60 by name
+		// in the Unstable section.
 		for (EffectDefinition def : EffectRegistry.all()) {
 			if (!def.counterplay()) {
-				check(def.minEntropy() == 40 && def.maxEntropy() == 60,
-						"every counterplay = false effect sits at 40-60 (" + def.id() + ")");
+				check(def.minEntropy() >= 40,
+						"no counterplay = false effect can appear below entropy 40 (" + def.id()
+								+ " opens at " + def.minEntropy() + ")");
 			}
 		}
 
@@ -1034,9 +1041,17 @@ public final class HarnessMain {
 						"nothing BAD sits above the tier Debt Collector targets (" + def.id() + ")");
 			}
 		}
-		check(extreme.stream().anyMatch(e -> e.id().equals("unstable"))
-						&& extreme.stream().anyMatch(e -> e.id().equals("earthquake")),
-				"today that tier is Unstable and Earthquake");
+		// It WAS Unstable and Earthquake. Tier 4 moved it, which is the derivation
+		// doing what its javadoc promised rather than a constant going stale -- and
+		// the consequence is stated rather than discovered: Debt Collector, picked
+		// at 40-60, now hands over a curse from the 81-100 band.
+		check(floor == 81, "the extreme BAD tier now opens at entropy 81 (was 40)");
+		check(extreme.size() == 2
+						&& extreme.stream().anyMatch(e -> e.id().equals("last_thread"))
+						&& extreme.stream().anyMatch(e -> e.id().equals("venom")),
+				"today that tier is Last Thread and Venom");
+		check(extreme.stream().noneMatch(e -> e.id().equals("unstable") || e.id().equals("earthquake")),
+				"...and Unstable and Earthquake are no longer in it");
 
 		java.util.Random random = new java.util.Random(1234);
 
@@ -5128,16 +5143,25 @@ public final class HarnessMain {
 		// handed one of those' cannot honestly be labelled survivable. The shape the
 		// check pins is unchanged and is asserted separately below: every one sits
 		// at 40-60.
-		check(falseCount == 3,
+		// 5 now: Tier 4's Last Thread and Venom. Still rare (5 of 114) and still
+		// each labelled for its own reason rather than by analogy with another.
+		check(falseCount == 5,
 				"counterplay = false is rare and deliberate -- " + falseCount + " of "
-						+ EffectRegistry.all().size() + " effects (Unstable, Earthquake), both "
-						+ "at 40-60, neither excused by the other");
+						+ EffectRegistry.all().size() + " effects (Unstable, Earthquake, Debt "
+						+ "Collector at 40-60; Last Thread, Venom at 81-100)");
 		for (EffectDefinition d : EffectRegistry.all()) {
 			if (!d.counterplay()) {
-				check(d.minEntropy() == 40 && d.maxEntropy() == 60,
-						"...and " + d.id() + " sits at 40-60 specifically, the same window "
-								+ "Unstable established for this class of effect");
+				boolean tier2Window = d.minEntropy() == 40 && d.maxEntropy() == 60;
+				boolean tier4Window = d.minEntropy() == 81 && d.maxEntropy() == 100;
+				check(tier2Window || tier4Window,
+						"...and " + d.id() + " sits at 40-60 (the window Unstable established) "
+								+ "or at Tier 4's 81-100 -- never below entropy 40");
 			}
+		}
+		for (String tier2 : List.of(UnstableBehavior.ID, "earthquake", "debt_collector")) {
+			EffectDefinition d = EffectRegistry.byId(tier2);
+			check(d.minEntropy() == 40 && d.maxEntropy() == 60,
+					"UNREGRESSED: " + tier2 + " is still at 40-60 -- Tier 3 moved no existing window");
 		}
 		// The invariant, now SATISFIED rather than flagged.
 		EffectDefinition unstableDef = EffectRegistry.byId(UnstableBehavior.ID);

@@ -113,7 +113,52 @@ public final class EffectBehaviors {
 		register(DebtCollectorBehavior.ID, new DebtCollectorBehavior());
 		register(NoDoOversBehavior.ID, new NoDoOversBehavior());
 
-		// TODO: Tiers 2-4 + odd/signature effects, same one-line-per-effect pattern.
+		// ---------- TIER 3 GOOD ----------
+		register(TitanHideBehavior.ID, new TitanHideBehavior());
+		register(AdamantPlatingBehavior.ID, new AdamantPlatingBehavior());
+		register(ExecutionerBehavior.ID, new ExecutionerBehavior());
+		register(BlurBehavior.ID, new BlurBehavior());
+		register(QuarryHandsBehavior.ID, new QuarryHandsBehavior());
+		register(LongArmBehavior.ID, new LongArmBehavior());
+		register(UnshakeableBehavior.ID, new UnshakeableBehavior());
+		register(MountainGoatBehavior.ID, new MountainGoatBehavior());
+		register(WhirlwindBehavior.ID, new WhirlwindBehavior());
+		register(BottomlessStomachBehavior.ID, new BottomlessStomachBehavior());
+		register(ProdigyBehavior.ID, new ProdigyBehavior());
+		register(NightEyesBehavior.ID, new NightEyesBehavior());
+		register(SalamanderBloodBehavior.ID, new SalamanderBloodBehavior());
+		register(GillsBehavior.ID, new GillsBehavior());
+		register(StoneskinBehavior.ID, new StoneskinBehavior());
+		register(SecondWindBehavior.ID, new SecondWindBehavior());
+		register(OverclockedBehavior.ID, new OverclockedBehavior());
+		register(VillageHeroBehavior.ID, new VillageHeroBehavior());
+		register(FeatherfallBehavior.ID, new FeatherfallBehavior());
+		// ---------- TIER 4 GOOD ----------
+		register(ApexPredatorBehavior.ID, new ApexPredatorBehavior());
+		register(StormstrideBehavior.ID, new StormstrideBehavior());
+		register(JuggernautBehavior.ID, new JuggernautBehavior());
+		// ---------- TIER 3 BAD ----------
+		register(WitheredFrameBehavior.ID, new WitheredFrameBehavior());
+		register(FeebleBehavior.ID, new FeebleBehavior());
+		register(MolassesBehavior.ID, new MolassesBehavior());
+		register(StoneHandsBehavior.ID, new StoneHandsBehavior());
+		register(ShortArmsBehavior.ID, new ShortArmsBehavior());
+		register(CrushingGravityBehavior.ID, new CrushingGravityBehavior());
+		register(GlassBonesBehavior.ID, new GlassBonesBehavior());
+		register(RustedPlatingBehavior.ID, new RustedPlatingBehavior());
+		register(LeadenSwingBehavior.ID, new LeadenSwingBehavior());
+		register(TinderboxBehavior.ID, new TinderboxBehavior());
+		register(GroundedBehavior.ID, new GroundedBehavior());
+		register(PaperSkinBehavior.ID, new PaperSkinBehavior());
+		register(StarvingBehavior.ID, new StarvingBehavior());
+		register(ForgetfulBehavior.ID, new ForgetfulBehavior());
+		register(ShadowBlindBehavior.ID, new ShadowBlindBehavior());
+		register(MarkedBehavior.ID, new MarkedBehavior());
+		register(InfestedBehavior.ID, new InfestedBehavior());
+		// ---------- TIER 4 BAD ----------
+		register(LastThreadBehavior.ID, new LastThreadBehavior());
+		register(VenomBehavior.ID, new VenomBehavior());
+		register(SunburnBehavior.ID, new SunburnBehavior());
 	}
 
 	/**
